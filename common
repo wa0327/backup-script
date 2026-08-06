@@ -1,5 +1,10 @@
 # backup 與 restore 共用的定義。由兩支腳本 source，不單獨執行。
 #
+# 環境術語：
+#   host      實體主機（原 questing），跑 lxc 容器的那台
+#   container lxc 容器（原 jammy），開發環境所在
+#   solo      單一環境主機：沒有容器，一台機器就是全部。視同 container。
+#
 # 呼叫端須先設定 RSYNC_MODE：
 #   backup  → 備份為本機的鏡像，用 --delete 使備份不致堆積已刪除的檔案
 #   restore → 只補不刪，用 --update 且不加 --delete，避免蓋掉本機較新的工作
@@ -11,19 +16,25 @@ case "$RSYNC_MODE" in
 esac
 
 BACKUP_ROOT=/media/jack/ext4
+HOST_BACKUP="$BACKUP_ROOT/host/home/jack"
+CONTAINER_BACKUP="$BACKUP_ROOT/container/home/jack"
 
-# 本機若有 lxc jammy 容器：本機身分是 questing host，容器身分是 jammy（2env）
-# 本機若沒有 lxc jammy 容器：本機自己就當作 jammy（1env）
+# 有 lxc 容器者為 host（另含 container）；沒有者為 solo，視同 container。
 if [ -d /var/lib/lxc/jammy/rootfs ]; then
-    has_container=1
-    jammy_root=/var/lib/lxc/jammy/rootfs
+    is_solo=0
+    container_root=/var/lib/lxc/jammy/rootfs
 else
-    has_container=0
-    jammy_root=""
+    is_solo=1
+    container_root=""          # solo：容器家目錄即本機家目錄
 fi
+CONTAINER_HOME="$container_root/home/jack"
+HOST_HOME=/home/jack           # solo 時與 CONTAINER_HOME 同為 /home/jack
 
 # 記錄失敗項目，由呼叫端在結尾統一回報
 failed=()
+
+# 記錄需人工還原的檔案，由 report 在結尾列出
+manual=()
 
 # sync_dir <源根目錄> <目標根目錄> <子目錄> [排除路徑...]
 # 排除路徑為相對於 <子目錄> 的 rsync --exclude 樣式，用於保護由其他行負責的子路徑
@@ -81,9 +92,49 @@ sync_files() {
     done
 }
 
+# ── dconf 設定 ─────────────────────────────────────────────────────
+# dconf 的資料存在二進位資料庫中，無法用 rsync 逐項同步，故匯出為文字檔備份。
+# 還原不自動執行：dconf load 會立即改變執行中的桌面設定，且不同機器的
+# 硬體相關項目常需調整，故僅提示指令，由人工決定是否套用。
+backup_dconf() {
+    local path="$1" out="$2" tmp
+    if ! command -v dconf >/dev/null 2>&1; then
+        echo "[$(basename "$out")] 無 dconf 指令，略過"
+        return
+    fi
+    tmp=$(mktemp) || return
+    if dconf dump "$path" >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        mkdir -p "$(dirname "$out")"
+        mv "$tmp" "$out"
+        echo "[$(basename "$out")] 已匯出 dconf $path"
+    else
+        rm -f "$tmp"
+        echo "[$(basename "$out")] dconf $path 無內容，略過"
+    fi
+}
+
+restore_dconf() {
+    local path="$1" file="$2"
+    if [ -e "$file" ]; then
+        manual+=("dconf load $path < $file")
+    else
+        echo "[$(basename "$file")] 備份不存在，略過"
+    fi
+}
+
 # 結尾統一回報，有失敗則以非 0 離開
 report() {
-    local action="$1"
+    local action="$1" m
+
+    if [ ${#manual[@]} -gt 0 ]; then
+        echo
+        echo "以下檔案不自動還原，請自行比對後決定是否套用："
+        for m in "${manual[@]}"; do
+            echo "  $m"
+        done
+        echo
+    fi
+
     if [ ${#failed[@]} -gt 0 ]; then
         echo "!! ${action}未完全成功，以下項目失敗：${failed[*]}"
         exit 1
@@ -92,27 +143,25 @@ report() {
 }
 
 # ── 家目錄設定檔清單 ────────────────────────────────────────────────
-# 依環境分成兩份清單，決定每個檔案對應到 questing 還是 jammy。
+# host 與 container 各有一份家目錄，同名檔案內容不同，須分開備份。
 #
-# 2env 主機（questing host + jammy 容器）：兩個家目錄各自獨立，
-#   完整清單對兩邊各跑一次，備份到各自的目錄，還原也原路還原。同名檔案
-#   分屬不同家目錄，互不相干，不需要任何裁決。
+# host 主機（host + container 並存）：完整清單對兩個家目錄各跑一次，
+#   備份到各自目錄，還原亦原路還原，無須裁決。
 #
-# 1env 主機（無容器，家目錄只有一份）：ext4/questing/ 與 ext4/jammy/ 底下
-#   都有同名檔案，但本機只有一份，必須裁決這一份對應到哪個 env。
-#   onepc_owner 即為該裁決表：未列出者一律歸 jammy（1env 主機視同 jammy）。
+# solo 主機（家目錄只有一份）：ext4 下 host/ 與 container/ 皆有同名檔案，
+#   必須裁決本機這一份對應哪邊。solo_owner_host 即為該裁決表，
+#   未列出者一律歸 container（solo 視同 container）。
 #
-# 刻意不備份：.claude/（GB 級，可重生）、.cargo/.rustup/.local/bin（可重裝）、
+# 刻意不備份：.cargo/.rustup/.local/bin（可重裝）、
 #             .config/Code 與 .config/google-chrome（GB 級快取）、.ros/.mavproxy（多為 log）
 
-# 家目錄設定檔完整清單。2env 時兩個家目錄都套用這份清單。
+# 家目錄設定檔完整清單。host 主機上兩個家目錄都套用這份清單。
 home_files=(
     .ssh                              # 私鑰，遺失無法重建
     .gnupg                            # GPG 私鑰，遺失無法重建
     .bashrc .profile .bash_aliases .inputrc .xinputrc .selected_editor
     .gitconfig .git-credentials
     .condarc                          # conda channel/solver 設定
-    .claude.json                      # Claude Code 全域設定
     .bash_history .python_history
     .colcon                           # ROS colcon 設定
     set_governor.sh                   # 家目錄下自己寫的腳本
@@ -121,67 +170,68 @@ home_files=(
 # VS Code 個人設定（只取設定本體，避開 3GB 級的快取與 globalStorage）
 vscode_user=(settings.json keybindings.json snippets)
 
-# ── 1env 裁決表 ────────────────────────────────────────────────────
-# 僅在 1env 主機生效。列於此者歸 questing，其餘一律歸 jammy。
-# 判準：該檔案屬於桌面／實體主機環境，而非容器內的開發環境。
-onepc_owner_questing=(
-    .gnupg                            # GPG 金鑰圈掛在實體主機
-    .xinputrc                         # 輸入法屬桌面環境
-    set_governor.sh                   # CPU 調頻，操作實體硬體
-    __vscode__                        # VS Code GUI 設定，見下方 vscode 判定
+# 只備份、不自動還原的檔案。還原時跳過並提示備份檔位置，由人工比對後決定
+# 要不要套用 —— 這些檔案一旦被覆蓋會直接改變 shell 環境，且各機器常有
+# 針對該機的差異（PATH、conda 初始化、機器專屬 alias），不宜整份蓋過去。
+no_auto_restore=(
+    .bashrc .profile .bash_aliases
 )
 
-# 判斷某檔案在 1env 時是否歸 questing
-is_questing_file() {
+is_no_auto_restore() {
     local f="$1" w
-    for w in "${onepc_owner_questing[@]}"; do
+    for w in "${no_auto_restore[@]}"; do
         [ "$f" = "$w" ] && return 0
     done
     return 1
 }
 
-# 依環境與裁決表，回傳某檔案該用的備份目錄
-# 2env 時由呼叫端直接指定，不會用到此函式
-onepc_backup_dir() {
-    if is_questing_file "$1"; then
-        echo "$BACKUP_ROOT/questing/home/jack"
+# ── solo 裁決表 ────────────────────────────────────────────────────
+# 僅在 solo 主機生效。列於此者歸 host，其餘一律歸 container。
+# 判準：該檔案屬於桌面／實體主機環境，而非容器內的開發環境。
+solo_owner_host=(
+    .gnupg                            # GPG 金鑰圈掛在實體主機
+    .xinputrc                         # 輸入法屬桌面環境
+    set_governor.sh                   # CPU 調頻，操作實體硬體
+    __vscode__                        # VS Code GUI 設定，見 _sync_vscode
+)
+
+# 判斷某檔案在 solo 主機上是否歸 host
+is_host_file() {
+    local f="$1" w
+    for w in "${solo_owner_host[@]}"; do
+        [ "$f" = "$w" ] && return 0
+    done
+    return 1
+}
+
+# 依裁決表回傳某檔案在 solo 主機上該用的備份目錄
+solo_backup_dir() {
+    if is_host_file "$1"; then
+        echo "$HOST_BACKUP"
     else
-        echo "$BACKUP_ROOT/jammy/home/jack"
+        echo "$CONTAINER_BACKUP"
     fi
 }
 
-# Claude memory 屬於 jammy，容器內位置為 repos/isaaclab-uav/.claude/memory
-# （見 lxc.mount.entry）。備份位置比照該佈局，純 jammy 環境才還原得回原處。
-# 2env 時它是 mount bind，容器 rootfs 內看到的是空掛載點，
-# 因此實際資料位置必須取 bind 的來源端 /home/jack/.claude/projects/...
-if [ "$has_container" = 1 ]; then
-    memory_live=/home/jack/.claude/projects/-home-jack-repos-isaaclab-uav
-else
-    memory_live="$jammy_root/home/jack/repos/isaaclab-uav/.claude"
-fi
-memory_backup="$BACKUP_ROOT/jammy/home/jack/repos/isaaclab-uav/.claude"
-
 # ── 家目錄設定檔的同步 ──────────────────────────────────────────────
-# 2env：兩個家目錄各自對應自己的備份目錄，全部檔案都跑。
-# 1env：家目錄只有一份，逐檔依裁決表決定要對應哪個備份目錄。
+# host 主機：兩個家目錄各自對應自己的備份目錄，全部檔案都跑。
+# solo 主機：家目錄只有一份，逐檔依裁決表決定要對應哪個備份目錄。
 # $1 為方向：to_backup（備份）或 to_home（還原）
 sync_home_files() {
-    local dir="$1" f home backup
+    local dir="$1" f
 
-    if [ "$has_container" = 1 ]; then
-        # 2env：jammy 容器家目錄 ↔ ext4/jammy，questing 裸機家目錄 ↔ ext4/questing
+    if [ "$is_solo" = 0 ]; then
         for f in "${home_files[@]}"; do
-            _sync_one "$dir" "$jammy_root/home/jack" "$BACKUP_ROOT/jammy/home/jack" "$f"
-            _sync_one "$dir" /home/jack "$BACKUP_ROOT/questing/home/jack" "$f"
+            _sync_one "$dir" "$CONTAINER_HOME" "$CONTAINER_BACKUP" "$f"
+            _sync_one "$dir" "$HOST_HOME"      "$HOST_BACKUP"      "$f"
         done
-        _sync_vscode "$dir" "$jammy_root/home/jack" "$BACKUP_ROOT/jammy/home/jack"
-        _sync_vscode "$dir" /home/jack "$BACKUP_ROOT/questing/home/jack"
+        _sync_vscode "$dir" "$CONTAINER_HOME" "$CONTAINER_BACKUP"
+        _sync_vscode "$dir" "$HOST_HOME"      "$HOST_BACKUP"
     else
-        # 1env：逐檔裁決
         for f in "${home_files[@]}"; do
-            _sync_one "$dir" /home/jack "$(onepc_backup_dir "$f")" "$f"
+            _sync_one "$dir" "$HOST_HOME" "$(solo_backup_dir "$f")" "$f"
         done
-        _sync_vscode "$dir" /home/jack "$(onepc_backup_dir __vscode__)"
+        _sync_vscode "$dir" "$HOST_HOME" "$(solo_backup_dir __vscode__)"
     fi
 }
 
@@ -189,6 +239,9 @@ _sync_one() {
     local dir="$1" home="$2" backup="$3" f="$4"
     if [ "$dir" = to_backup ]; then
         sync_dir "$home" "$backup" "$f"
+    elif is_no_auto_restore "$f"; then
+        # 僅在備份端確實有東西可還原時才提示，否則安靜跳過
+        [ -e "$backup/$f" ] && manual+=("$backup/$f  →  $home/$f")
     else
         sync_dir "$backup" "$home" "$f"
     fi

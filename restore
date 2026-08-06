@@ -5,25 +5,31 @@
 RSYNC_MODE=restore
 source "$(dirname "$0")/common" || exit 1
 
-J="$jammy_root/home/jack"        # jammy 家目錄（1env 時即本機家目錄）
-JB="$BACKUP_ROOT/jammy/home/jack"
-QB="$BACKUP_ROOT/questing/home/jack"
+C="$CONTAINER_HOME"              # container 家目錄（solo 時即本機家目錄）
+CB="$CONTAINER_BACKUP"
 
-# ── jammy 的大目錄 ──────────────────────────────────────────────────
-sync_dir "$JB/miniconda3/envs" "$J/miniconda3/envs" isaaclab
+# ── container 的大目錄 ──────────────────────────────────────────────
+sync_dir "$CB/miniconda3/envs" "$C/miniconda3/envs" isaaclab
 
 # Omniverse 快取（約 17G），還原後可省去 Isaac Sim 首次啟動的重新編譯
-sync_dir "$JB/.cache" "$J/.cache" ov
+sync_dir "$CB/.cache" "$C/.cache" ov
 
 # 飛控原始碼
-sync_files "$JB" "$J" ardupilot PX4-Autopilot
+sync_files "$CB" "$C" ardupilot PX4-Autopilot
 
-# 排除 .claude/memory：該路徑在 2env 上是 mount bind 掛載點，直接寫入會落在
-# 容器 rootfs 的空掛載點而非真正的資料位置，故由下一行單獨還原到 bind 來源端
-sync_dir "$JB/repos" "$J/repos" isaaclab-uav ".claude/memory"
-sync_dir "$memory_backup" "$memory_live" memory
+# 排除 .claude/memory：該路徑在 host 主機上是 mount bind 掛載點，直接寫入會落在
+# 容器 rootfs 的空掛載點而非真正的資料位置。memory 由下方 projects 一併還原。
+sync_dir "$CB/repos" "$C/repos" isaaclab-uav ".claude/memory"
 
-# ── 家目錄設定檔（清單與 1env 裁決表見 common）─────────────────────
+# ── host 的 Claude 專案紀錄 ─────────────────────────────────────────
+# 路徑在 host 與 solo 上皆為 /home/jack/.claude/projects。
+# memory 亦在其中，還原至 bind 來源端後，容器內即可透過 bind 看到。
+sync_dir "$HOST_BACKUP/.claude" "$HOST_HOME/.claude" projects
+
+# ── 家目錄設定檔（清單與 solo 裁決表見 common）─────────────────────
 sync_home_files to_home
+
+# Tilix 設定不自動套用，僅於結尾提示 dconf load 指令
+restore_dconf /com/gexperts/Tilix/ "$HOST_BACKUP/tilix.dconf"
 
 report 還原
