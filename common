@@ -72,8 +72,12 @@ sync_dir() {
         fi
     else
         echo "[$sub] 目標已存在，執行增量同步"
+        # sub 可能含中間目錄（如 default/grub），須連同層級一起放，
+        # 否則會被平鋪到 dst_root 下而與 tar 分支的結果不一致
+        local dst_parent="$dst_root/$(dirname "$sub")"
+        mkdir -p "$dst_parent"
         if ! rsync -aHAX --numeric-ids "${rsync_flags[@]}" "${excludes[@]}" \
-                  "$src_root/$sub" "$dst_root/"; then
+                  "$src_root/$sub" "$dst_parent/"; then
             echo "[$sub] !! 增量同步失敗"
             failed+=("$sub")
         fi
@@ -162,15 +166,11 @@ backup_session_state() {
     done
 }
 
-# 覆蓋前先把現有檔案移到 .restore-bak-<時間>/，避免誤還原後無法回頭。
-# 此處刻意不使用 --update：使用者既已明示要還原，即應以備份端為準。
+# 直接以備份端覆蓋，不保留原檔。
+# 刻意不使用 --update：使用者既已明示要還原，即應以備份端為準。
 _force_restore() {
-    local src="$1" dst="$2" stash="$3"
+    local src="$1" dst="$2"
     [ -e "$src" ] || { echo "  [$(basename "$dst")] 備份不存在，略過"; return; }
-    if [ -e "$dst" ]; then
-        mkdir -p "$stash/$(dirname "${dst#/home/jack/}")"
-        cp -a "$dst" "$stash/${dst#/home/jack/}"
-    fi
     mkdir -p "$(dirname "$dst")"
     if rsync -aHAX --numeric-ids --delete "$src" "$(dirname "$dst")/"; then
         echo "  [$(basename "$dst")] 已還原"
@@ -184,7 +184,7 @@ _force_restore() {
 # Chrome／VS Code 的資料庫在程式執行中被覆寫會損毀設定。
 # 須由 restore 以 --chrome／--vscode 明確指定才會實際執行，且會先確認程式已關閉。
 restore_session_state() {
-    local do_chrome="$1" do_vscode="$2" stash running
+    local do_chrome="$1" do_vscode="$2" running
 
     if [ "$do_chrome" = 0 ] && [ "$do_vscode" = 0 ]; then
         [ -e "$HOST_BACKUP/.local/share/keyrings" ] &&
@@ -213,30 +213,80 @@ restore_session_state() {
     fi
     [ "$do_chrome" = 0 ] && [ "$do_vscode" = 0 ] && return 0
 
-    stash="/home/jack/.restore-bak-$(date +%Y%m%d-%H%M%S)"
-    echo "還原登入狀態（原有檔案備份至 $stash）"
+    echo "還原登入狀態（直接覆蓋，不保留原檔）"
 
     # keyring 是 Chrome 與 VS Code 共用的解密金鑰來源，兩者任一都需要它
     _force_restore "$HOST_BACKUP/.local/share/keyrings" \
-                   /home/jack/.local/share/keyrings "$stash"
+                   /home/jack/.local/share/keyrings
 
     if [ "$do_chrome" = 1 ]; then
         _force_restore "$HOST_BACKUP/.config/google-chrome/Local State" \
-                       "$CHROME_DIR/Local State" "$stash"
+                       "$CHROME_DIR/Local State"
         local f
         for f in "${chrome_profile_plain[@]}" "${chrome_profile_sqlite[@]}"; do
             _force_restore "$HOST_BACKUP/.config/google-chrome/Default/$f" \
-                           "$CHROME_DIR/Default/$f" "$stash"
+                           "$CHROME_DIR/Default/$f"
         done
     fi
 
     if [ "$do_vscode" = 1 ]; then
         _force_restore "$HOST_BACKUP/.config/Code/User/globalStorage/state.vscdb" \
-                       "$VSCODE_STATE_DIR/state.vscdb" "$stash"
+                       "$VSCODE_STATE_DIR/state.vscdb"
     fi
 
     echo "登入狀態還原完成。keyring 已更換，須登出桌面重新登入才會生效。"
     return 0
+}
+
+# ── 個人資料與系統設定的還原 ────────────────────────────────────────
+# 個人資料量大且可能已在本機編輯過，故沿用一般還原語意（只補不刪、
+# 目標較新者不覆蓋），而非登入狀態那種整組覆寫。
+restore_personal() {
+    local apply="$1"
+    if [ "$apply" != 1 ]; then
+        manual+=("個人資料（${personal_dirs[*]}）：加 --personal 才會還原")
+        return 0
+    fi
+    sync_files "$CONTAINER_BACKUP" "$CONTAINER_HOME" "${personal_dirs[@]}"
+    if [ "$is_solo" = 0 ]; then
+        sync_files "$HOST_BACKUP" "$HOST_HOME" "${personal_dirs[@]}"
+    fi
+}
+
+# /etc 與 lxc 設定需 root 才能寫入，且會影響開機與權限，故預設只提示。
+# lxc 容器定義檔不在此處理：它是指向 repos/lxc-config/jammy 的符號連結，
+# 實檔隨 repos 還原即可，只需重建該連結。
+restore_etc() {
+    local apply="$1" f src
+
+    if [ "$apply" != 1 ]; then
+        [ -d "$BACKUP_ROOT/host/etc" ] &&
+            manual+=("（需 root）$BACKUP_ROOT/host/etc/  →  /etc/：加 --etc 才會還原")
+        return 0
+    fi
+
+    if ! sudo -n true 2>/dev/null; then
+        echo "!! --etc 需要 root 權限，請以可 sudo 的身分執行"
+        failed+=("etc：無 root 權限")
+        return 0
+    fi
+
+    echo "還原系統設定（直接覆蓋，不保留原檔）"
+    for f in "${etc_files[@]}"; do
+        src="$BACKUP_ROOT/host/etc/$f"
+        if [ ! -e "$src" ]; then
+            echo "  [$f] 備份不存在，略過"
+            continue
+        fi
+        if sudo install -D -m "$(stat -c %a "$src")" -o root -g root "$src" "/etc/$f"; then
+            echo "  [$f] 已還原"
+        else
+            echo "  [$f] !! 還原失敗"
+            failed+=("etc/$f")
+        fi
+    done
+
+    echo "系統設定還原完成。fstab／grub 變更需重開機，sudoers 立即生效。"
 }
 
 # ── dconf 設定 ─────────────────────────────────────────────────────
@@ -260,12 +310,22 @@ backup_dconf() {
     fi
 }
 
+# $3 為 1 時直接套用（--all），否則僅提示指令
 restore_dconf() {
-    local path="$1" file="$2"
-    if [ -e "$file" ]; then
-        manual+=("dconf load $path < $file")
-    else
+    local path="$1" file="$2" apply="${3:-0}"
+    if [ ! -e "$file" ]; then
         echo "[$(basename "$file")] 備份不存在，略過"
+        return
+    fi
+    if [ "$apply" != 1 ]; then
+        manual+=("dconf load $path < $file")
+        return
+    fi
+    if dconf load "$path" <"$file" 2>/dev/null; then
+        echo "[$(basename "$file")] 已套用 dconf $path"
+    else
+        echo "[$(basename "$file")] !! dconf 套用失敗"
+        failed+=("$(basename "$file")")
     fi
 }
 
@@ -317,6 +377,17 @@ home_files=(
 # VS Code 個人設定（只取設定本體，避開 3GB 級的快取與 globalStorage）
 vscode_user=(settings.json keybindings.json snippets)
 
+# 個人資料目錄。host 與 container 各有一份，內容不同，故兩邊分別備份。
+personal_dirs=(Desktop Documents Downloads Music Pictures Videos)
+
+# host 的系統設定檔。備份到 host/etc/，還原須自行以 root 放回。
+etc_files=(
+    fstab                             # 分割區與掛載設定
+    default/grub                      # 開機參數
+    default/locale                    # 系統語系
+    sudoers.d/jack                    # sudo 權限設定
+)
+
 # 只備份、不自動還原的檔案。還原時跳過並提示備份檔位置，由人工比對後決定
 # 要不要套用 —— 這些檔案一旦被覆蓋會直接改變 shell 環境，且各機器常有
 # 針對該機的差異（PATH、conda 初始化、機器專屬 alias），不宜整份蓋過去。
@@ -364,8 +435,10 @@ solo_backup_dir() {
 # host 主機：兩個家目錄各自對應自己的備份目錄，全部檔案都跑。
 # solo 主機：家目錄只有一份，逐檔依裁決表決定要對應哪個備份目錄。
 # $1 為方向：to_backup（備份）或 to_home（還原）
+# $2 為 1 時，連 no_auto_restore 清單內的檔案也一併還原（--all）
 sync_home_files() {
     local dir="$1" f
+    force_all="${2:-0}"
 
     if [ "$is_solo" = 0 ]; then
         for f in "${home_files[@]}"; do
@@ -386,9 +459,11 @@ _sync_one() {
     local dir="$1" home="$2" backup="$3" f="$4"
     if [ "$dir" = to_backup ]; then
         sync_dir "$home" "$backup" "$f"
-    elif is_no_auto_restore "$f"; then
+    elif is_no_auto_restore "$f" && [ "${force_all:-0}" != 1 ]; then
         # 僅在備份端確實有東西可還原時才提示，否則安靜跳過
         [ -e "$backup/$f" ] && manual+=("$backup/$f  →  $home/$f")
+    elif is_no_auto_restore "$f"; then
+        _force_restore "$backup/$f" "$home/$f"
     else
         sync_dir "$backup" "$home" "$f"
     fi
