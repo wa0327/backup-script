@@ -37,7 +37,10 @@ sync_dir() {
         fi
     else
         echo "[$sub] 目標已存在，執行增量同步"
-        if ! rsync -aHAX --numeric-ids --delete "${excludes[@]}" "$src_root/$sub" "$dst_root/"; then
+        # 還原方向刻意不加 --delete：本機多出來的檔案一律保留，不因備份端沒有而刪除。
+        # --update：目標端較新者不覆蓋，避免蓋掉本機尚未備份的工作。
+        # 兩者合起來使還原為「只補不刪、只更新較舊者」，不會造成本機資料遺失。
+        if ! rsync -aHAX --numeric-ids --update "${excludes[@]}" "$src_root/$sub" "$dst_root/"; then
             echo "[$sub] !! 增量同步失敗"
             failed+=("$sub")
         fi
@@ -68,8 +71,8 @@ for d in ardupilot PX4-Autopilot; do
     sync_dir /media/jack/ext4/jammy/home/jack "$jammy_root/home/jack" "$d"
 done
 
-# 排除 .claude/memory，理由同 backup：該路徑在 questing host 上是 mount bind 掛載點，
-# 由下一段單獨還原到 bind 的來源端
+# 排除 .claude/memory：該路徑在 questing host 上是 mount bind 掛載點，
+# 直接寫入會落在容器 rootfs 的空掛載點而非真正的資料位置，故由下一段單獨還原到 bind 來源端
 sync_dir /media/jack/ext4/jammy/home/jack/repos "$jammy_root/home/jack/repos" isaaclab-uav \
          ".claude/memory"
 
