@@ -41,7 +41,7 @@ for a in "$@"; do
 done
 
 RSYNC_MODE=restore
-source "$(dirname "$0")/common" || exit 1
+source "$(dirname "$0")/common.sh" || exit 1
 
 C="$CONTAINER_HOME"              # container 家目錄（solo 時即本機家目錄）
 CB="$CONTAINER_BACKUP"
@@ -75,7 +75,7 @@ restore_personal "$do_personal"
 # ── host 系統設定（須 --etc，需 root）───────────────────────────────
 restore_etc "$do_etc"
 
-# ── 家目錄設定檔（清單與 solo 裁決表見 common）─────────────────────
+# ── 家目錄設定檔（清單與 solo 裁決表見 common.sh）─────────────────────
 sync_home_files to_home "$do_all"
 
 # Tilix 設定預設僅提示 dconf load 指令，--all 時直接套用

@@ -1,4 +1,4 @@
-# backup 與 restore 共用的定義。由兩支腳本 source，不單獨執行。
+# backup 與 restore 共用的定義。由 backup.sh 與 restore.sh source，不單獨執行。
 #
 # 環境術語：
 #   host      實體主機（原 questing），跑 lxc 容器的那台
@@ -12,7 +12,7 @@
 case "$RSYNC_MODE" in
     backup)  rsync_flags=(--delete) ;;
     restore) rsync_flags=(--update) ;;
-    *) echo "common: 未設定 RSYNC_MODE（backup|restore）" >&2; exit 1 ;;
+    *) echo "common.sh: 未設定 RSYNC_MODE（backup|restore）" >&2; exit 1 ;;
 esac
 
 BACKUP_ROOT=/media/jack/ext4

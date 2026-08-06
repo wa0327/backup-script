@@ -2,7 +2,7 @@
 # 從本機備份到 ext4。備份為本機的鏡像（帶 --delete）。
 
 RSYNC_MODE=backup
-source "$(dirname "$0")/common" || exit 1
+source "$(dirname "$0")/common.sh" || exit 1
 
 C="$CONTAINER_HOME"              # container 家目錄（solo 時即本機家目錄）
 CB="$CONTAINER_BACKUP"
@@ -42,13 +42,13 @@ fi
 # 符號連結，實檔已隨上方 host repos 一併備份。
 sync_files /etc "$BACKUP_ROOT/host/etc" "${etc_files[@]}"
 
-# ── 家目錄設定檔（清單與 solo 裁決表見 common）─────────────────────
+# ── 家目錄設定檔（清單與 solo 裁決表見 common.sh）─────────────────────
 sync_home_files to_backup
 
 # Tilix 終端機設定存於 dconf，須匯出。屬桌面環境，歸 host。
 backup_dconf /com/gexperts/Tilix/ "$HOST_BACKUP/tilix.dconf"
 
-# Chrome／VS Code 登入狀態與 gnome-keyring（三者須齊備才有意義，見 common）
+# Chrome／VS Code 登入狀態與 gnome-keyring（三者須齊備才有意義，見 common.sh）
 backup_session_state
 
 # 確保所有資料真正落到磁碟，避免拔碟時資料還停留在快取
