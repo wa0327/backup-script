@@ -1,0 +1,202 @@
+# backup 與 restore 共用的定義。由兩支腳本 source，不單獨執行。
+#
+# 呼叫端須先設定 RSYNC_MODE：
+#   backup  → 備份為本機的鏡像，用 --delete 使備份不致堆積已刪除的檔案
+#   restore → 只補不刪，用 --update 且不加 --delete，避免蓋掉本機較新的工作
+
+case "$RSYNC_MODE" in
+    backup)  rsync_flags=(--delete) ;;
+    restore) rsync_flags=(--update) ;;
+    *) echo "common: 未設定 RSYNC_MODE（backup|restore）" >&2; exit 1 ;;
+esac
+
+BACKUP_ROOT=/media/jack/ext4
+
+# 本機若有 lxc jammy 容器：本機身分是 questing host，容器身分是 jammy（2env）
+# 本機若沒有 lxc jammy 容器：本機自己就當作 jammy（1env）
+if [ -d /var/lib/lxc/jammy/rootfs ]; then
+    has_container=1
+    jammy_root=/var/lib/lxc/jammy/rootfs
+else
+    has_container=0
+    jammy_root=""
+fi
+
+# 記錄失敗項目，由呼叫端在結尾統一回報
+failed=()
+
+# sync_dir <源根目錄> <目標根目錄> <子目錄> [排除路徑...]
+# 排除路徑為相對於 <子目錄> 的 rsync --exclude 樣式，用於保護由其他行負責的子路徑
+sync_dir() {
+    local src_root="$1"
+    local dst_root="$2"
+    local sub="$3"
+    shift 3
+
+    local excludes=()
+    local e
+    for e in "$@"; do
+        excludes+=(--exclude "$e")
+    done
+
+    if [ ! -e "$src_root/$sub" ]; then
+        echo "[$sub] 來源不存在，略過"
+        return
+    fi
+
+    if [ ! -e "$dst_root/$sub" ]; then
+        # 目標不存在：第一次，全量搬遷
+        echo "[$sub] 目標不存在，執行全量搬遷"
+        mkdir -p "$dst_root"
+        local tar_excludes=()
+        for e in "$@"; do
+            tar_excludes+=(--exclude "$sub/$e")
+        done
+        # PIPESTATUS 檢查打包端，管線末端的解壓成功不代表來源全部讀得到
+        tar -cf - "${tar_excludes[@]}" -C "$src_root" "$sub" | tar -xpf - -C "$dst_root"
+        local rc=("${PIPESTATUS[@]}")
+        if [ "${rc[0]}" != 0 ] || [ "${rc[1]}" != 0 ]; then
+            echo "[$sub] !! 全量搬遷失敗（tar 打包=${rc[0]} 解壓=${rc[1]}）"
+            failed+=("$sub")
+        fi
+    else
+        echo "[$sub] 目標已存在，執行增量同步"
+        if ! rsync -aHAX --numeric-ids "${rsync_flags[@]}" "${excludes[@]}" \
+                  "$src_root/$sub" "$dst_root/"; then
+            echo "[$sub] !! 增量同步失敗"
+            failed+=("$sub")
+        fi
+    fi
+}
+
+# sync_files <源根目錄> <目標根目錄> <檔案...>
+sync_files() {
+    local src_root="$1"
+    local dst_root="$2"
+    shift 2
+
+    local f
+    for f in "$@"; do
+        sync_dir "$src_root" "$dst_root" "$f"
+    done
+}
+
+# 結尾統一回報，有失敗則以非 0 離開
+report() {
+    local action="$1"
+    if [ ${#failed[@]} -gt 0 ]; then
+        echo "!! ${action}未完全成功，以下項目失敗：${failed[*]}"
+        exit 1
+    fi
+    echo "${action}完成"
+}
+
+# ── 家目錄設定檔清單 ────────────────────────────────────────────────
+# 依環境分成兩份清單，決定每個檔案對應到 questing 還是 jammy。
+#
+# 2env 主機（questing host + jammy 容器）：兩個家目錄各自獨立，
+#   完整清單對兩邊各跑一次，備份到各自的目錄，還原也原路還原。同名檔案
+#   分屬不同家目錄，互不相干，不需要任何裁決。
+#
+# 1env 主機（無容器，家目錄只有一份）：ext4/questing/ 與 ext4/jammy/ 底下
+#   都有同名檔案，但本機只有一份，必須裁決這一份對應到哪個 env。
+#   onepc_owner 即為該裁決表：未列出者一律歸 jammy（1env 主機視同 jammy）。
+#
+# 刻意不備份：.claude/（GB 級，可重生）、.cargo/.rustup/.local/bin（可重裝）、
+#             .config/Code 與 .config/google-chrome（GB 級快取）、.ros/.mavproxy（多為 log）
+
+# 家目錄設定檔完整清單。2env 時兩個家目錄都套用這份清單。
+home_files=(
+    .ssh                              # 私鑰，遺失無法重建
+    .gnupg                            # GPG 私鑰，遺失無法重建
+    .bashrc .profile .bash_aliases .inputrc .xinputrc .selected_editor
+    .gitconfig .git-credentials
+    .condarc                          # conda channel/solver 設定
+    .claude.json                      # Claude Code 全域設定
+    .bash_history .python_history
+    .colcon                           # ROS colcon 設定
+    set_governor.sh                   # 家目錄下自己寫的腳本
+)
+
+# VS Code 個人設定（只取設定本體，避開 3GB 級的快取與 globalStorage）
+vscode_user=(settings.json keybindings.json snippets)
+
+# ── 1env 裁決表 ────────────────────────────────────────────────────
+# 僅在 1env 主機生效。列於此者歸 questing，其餘一律歸 jammy。
+# 判準：該檔案屬於桌面／實體主機環境，而非容器內的開發環境。
+onepc_owner_questing=(
+    .gnupg                            # GPG 金鑰圈掛在實體主機
+    .xinputrc                         # 輸入法屬桌面環境
+    set_governor.sh                   # CPU 調頻，操作實體硬體
+    __vscode__                        # VS Code GUI 設定，見下方 vscode 判定
+)
+
+# 判斷某檔案在 1env 時是否歸 questing
+is_questing_file() {
+    local f="$1" w
+    for w in "${onepc_owner_questing[@]}"; do
+        [ "$f" = "$w" ] && return 0
+    done
+    return 1
+}
+
+# 依環境與裁決表，回傳某檔案該用的備份目錄
+# 2env 時由呼叫端直接指定，不會用到此函式
+onepc_backup_dir() {
+    if is_questing_file "$1"; then
+        echo "$BACKUP_ROOT/questing/home/jack"
+    else
+        echo "$BACKUP_ROOT/jammy/home/jack"
+    fi
+}
+
+# Claude memory 屬於 jammy，容器內位置為 repos/isaaclab-uav/.claude/memory
+# （見 lxc.mount.entry）。備份位置比照該佈局，純 jammy 環境才還原得回原處。
+# 2env 時它是 mount bind，容器 rootfs 內看到的是空掛載點，
+# 因此實際資料位置必須取 bind 的來源端 /home/jack/.claude/projects/...
+if [ "$has_container" = 1 ]; then
+    memory_live=/home/jack/.claude/projects/-home-jack-repos-isaaclab-uav
+else
+    memory_live="$jammy_root/home/jack/repos/isaaclab-uav/.claude"
+fi
+memory_backup="$BACKUP_ROOT/jammy/home/jack/repos/isaaclab-uav/.claude"
+
+# ── 家目錄設定檔的同步 ──────────────────────────────────────────────
+# 2env：兩個家目錄各自對應自己的備份目錄，全部檔案都跑。
+# 1env：家目錄只有一份，逐檔依裁決表決定要對應哪個備份目錄。
+# $1 為方向：to_backup（備份）或 to_home（還原）
+sync_home_files() {
+    local dir="$1" f home backup
+
+    if [ "$has_container" = 1 ]; then
+        # 2env：jammy 容器家目錄 ↔ ext4/jammy，questing 裸機家目錄 ↔ ext4/questing
+        for f in "${home_files[@]}"; do
+            _sync_one "$dir" "$jammy_root/home/jack" "$BACKUP_ROOT/jammy/home/jack" "$f"
+            _sync_one "$dir" /home/jack "$BACKUP_ROOT/questing/home/jack" "$f"
+        done
+        _sync_vscode "$dir" "$jammy_root/home/jack" "$BACKUP_ROOT/jammy/home/jack"
+        _sync_vscode "$dir" /home/jack "$BACKUP_ROOT/questing/home/jack"
+    else
+        # 1env：逐檔裁決
+        for f in "${home_files[@]}"; do
+            _sync_one "$dir" /home/jack "$(onepc_backup_dir "$f")" "$f"
+        done
+        _sync_vscode "$dir" /home/jack "$(onepc_backup_dir __vscode__)"
+    fi
+}
+
+_sync_one() {
+    local dir="$1" home="$2" backup="$3" f="$4"
+    if [ "$dir" = to_backup ]; then
+        sync_dir "$home" "$backup" "$f"
+    else
+        sync_dir "$backup" "$home" "$f"
+    fi
+}
+
+_sync_vscode() {
+    local dir="$1" home="$2/.config/Code/User" backup="$3/.config/Code/User" f
+    for f in "${vscode_user[@]}"; do
+        _sync_one "$dir" "$home" "$backup" "$f"
+    done
+}
