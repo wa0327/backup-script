@@ -32,6 +32,9 @@ sync_home_files to_backup
 # Tilix 終端機設定存於 dconf，須匯出。屬桌面環境，歸 host。
 backup_dconf /com/gexperts/Tilix/ "$HOST_BACKUP/tilix.dconf"
 
+# Chrome／VS Code 登入狀態與 gnome-keyring（三者須齊備才有意義，見 common）
+backup_session_state
+
 # 確保所有資料真正落到磁碟，避免拔碟時資料還停留在快取
 sync
 report 備份

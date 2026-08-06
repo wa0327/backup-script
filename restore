@@ -2,6 +2,31 @@
 # 從 ext4 還原回本機。只補不刪（--update 且不加 --delete），
 # 本機較新或本機獨有的檔案一律保留，不會造成資料遺失。
 
+usage() {
+    cat <<'USAGE'
+用法：restore [--chrome] [--vscode]
+
+不加參數時只還原一般檔案；登入狀態僅列出提示，不會動到。
+
+  --chrome   一併還原 Chrome 登入狀態（cookie、密碼）與 gnome-keyring
+  --vscode   一併還原 VS Code 登入狀態與 gnome-keyring
+
+兩者都會覆寫 keyring，原有檔案先備份至 ~/.restore-bak-<時間>/。
+執行前須先完全關閉對應程式，還原後須登出桌面重新登入才會生效。
+USAGE
+}
+
+do_chrome=0
+do_vscode=0
+for a in "$@"; do
+    case "$a" in
+        --chrome) do_chrome=1 ;;
+        --vscode) do_vscode=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "未知參數：$a" >&2; usage >&2; exit 1 ;;
+    esac
+done
+
 RSYNC_MODE=restore
 source "$(dirname "$0")/common" || exit 1
 
@@ -31,5 +56,9 @@ sync_home_files to_home
 
 # Tilix 設定不自動套用，僅於結尾提示 dconf load 指令
 restore_dconf /com/gexperts/Tilix/ "$HOST_BACKUP/tilix.dconf"
+
+# 登入狀態預設不還原（會清掉本機 keyring／損毀執行中的資料庫），
+# 須以 --chrome／--vscode 明確指定
+restore_session_state "$do_chrome" "$do_vscode"
 
 report 還原

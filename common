@@ -92,6 +92,153 @@ sync_files() {
     done
 }
 
+# ── 登入狀態（Chrome／VS Code／keyring）─────────────────────────────
+# 這些資料只在「金鑰 + 資料」齊備時才有意義：
+#   Chrome cookie 為 v11 加密，解密金鑰存於 gnome-keyring，不在設定目錄內；
+#   VS Code 的 token 同樣經 Secret Service 存入 keyring。
+# 因此 keyrings/ 必須與應用程式資料一併備份，缺一則還原後等同未登入。
+#
+# 一律歸 host：瀏覽器與 GUI 編輯器屬桌面環境，solo 主機亦同。
+#
+# 執行中的 SQLite 直接複製可能取到寫入中的殘缺狀態，故以 SQLite 備份 API
+# 取一致性快照；其餘為 JSON 或二進位檔，直接同步即可。
+
+# Chrome 設定檔根目錄下（非 Default/）
+chrome_root_plain=("Local State")
+# Chrome Default/ 之下
+chrome_profile_sqlite=("Cookies" "Login Data" "Login Data For Account" "Web Data")
+chrome_profile_plain=("Preferences")
+# VS Code globalStorage 之下
+vscode_state_sqlite=(state.vscdb)
+
+CHROME_DIR=/home/jack/.config/google-chrome
+VSCODE_STATE_DIR=/home/jack/.config/Code/User/globalStorage
+
+# 以 SQLite 備份 API 取一致性快照（來源可為使用中的資料庫）
+backup_sqlite() {
+    local src="$1" dst="$2"
+    if [ ! -e "$src" ]; then
+        echo "[$(basename "$src")] 來源不存在，略過"
+        return
+    fi
+    mkdir -p "$(dirname "$dst")"
+    if python3 - "$src" "$dst" <<'PY' 2>/dev/null
+import sqlite3, sys
+src, dst = sys.argv[1], sys.argv[2]
+s = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+d = sqlite3.connect(dst)
+s.backup(d)
+d.close(); s.close()
+PY
+    then
+        # python 建檔套用預設 umask，須比照來源收緊：內含 session token
+        chmod --reference="$src" "$dst" 2>/dev/null || chmod 600 "$dst"
+        echo "[$(basename "$src")] 已取一致性快照"
+    else
+        echo "[$(basename "$src")] !! SQLite 快照失敗"
+        failed+=("$(basename "$src")")
+    fi
+}
+
+# 登入狀態的備份。還原不自動執行，理由見 restore_session_state。
+backup_session_state() {
+    local f
+    # gnome-keyring：Chrome／VS Code 的解密金鑰所在，缺此則其餘備份無效
+    sync_dir /home/jack/.local/share "$HOST_BACKUP/.local/share" keyrings
+
+    for f in "${chrome_root_plain[@]}"; do
+        sync_dir "$CHROME_DIR" "$HOST_BACKUP/.config/google-chrome" "$f"
+    done
+    for f in "${chrome_profile_plain[@]}"; do
+        sync_dir "$CHROME_DIR/Default" "$HOST_BACKUP/.config/google-chrome/Default" "$f"
+    done
+    for f in "${chrome_profile_sqlite[@]}"; do
+        backup_sqlite "$CHROME_DIR/Default/$f" \
+                      "$HOST_BACKUP/.config/google-chrome/Default/$f"
+    done
+    for f in "${vscode_state_sqlite[@]}"; do
+        backup_sqlite "$VSCODE_STATE_DIR/$f" \
+                      "$HOST_BACKUP/.config/Code/User/globalStorage/$f"
+    done
+}
+
+# 覆蓋前先把現有檔案移到 .restore-bak-<時間>/，避免誤還原後無法回頭。
+# 此處刻意不使用 --update：使用者既已明示要還原，即應以備份端為準。
+_force_restore() {
+    local src="$1" dst="$2" stash="$3"
+    [ -e "$src" ] || { echo "  [$(basename "$dst")] 備份不存在，略過"; return; }
+    if [ -e "$dst" ]; then
+        mkdir -p "$stash/$(dirname "${dst#/home/jack/}")"
+        cp -a "$dst" "$stash/${dst#/home/jack/}"
+    fi
+    mkdir -p "$(dirname "$dst")"
+    if rsync -aHAX --numeric-ids --delete "$src" "$(dirname "$dst")/"; then
+        echo "  [$(basename "$dst")] 已還原"
+    else
+        echo "  [$(basename "$dst")] !! 還原失敗"
+        failed+=("$(basename "$dst")")
+    fi
+}
+
+# 還原登入狀態。預設只提示不執行 —— keyring 覆蓋會連帶清掉本機自己的密碼，
+# Chrome／VS Code 的資料庫在程式執行中被覆寫會損毀設定。
+# 須由 restore 以 --chrome／--vscode 明確指定才會實際執行，且會先確認程式已關閉。
+restore_session_state() {
+    local do_chrome="$1" do_vscode="$2" stash running
+
+    if [ "$do_chrome" = 0 ] && [ "$do_vscode" = 0 ]; then
+        [ -e "$HOST_BACKUP/.local/share/keyrings" ] &&
+            manual+=("keyring／Chrome／VS Code 登入狀態：加 --chrome 或 --vscode 才會還原")
+        return 0
+    fi
+
+    # 程式執行中覆寫資料庫會損毀設定，先擋下。
+    # 樣式錨定於 command line 開頭，否則任何「提到」該路徑的指令（含本腳本
+    # 自身與一般 shell 操作）都會被誤判為程式執行中。
+    if [ "$do_chrome" = 1 ]; then
+        running=$(pgrep -c -f '^/opt/google/chrome/chrome' || true)
+        if [ "${running:-0}" -gt 0 ]; then
+            echo "!! Chrome 執行中（$running 個 process），請先完全關閉再重跑"
+            failed+=("chrome：執行中")
+            do_chrome=0
+        fi
+    fi
+    if [ "$do_vscode" = 1 ]; then
+        running=$(pgrep -c -f '^/usr/share/code/' || true)
+        if [ "${running:-0}" -gt 0 ]; then
+            echo "!! VS Code 執行中（$running 個 process），請先完全關閉再重跑"
+            failed+=("vscode：執行中")
+            do_vscode=0
+        fi
+    fi
+    [ "$do_chrome" = 0 ] && [ "$do_vscode" = 0 ] && return 0
+
+    stash="/home/jack/.restore-bak-$(date +%Y%m%d-%H%M%S)"
+    echo "還原登入狀態（原有檔案備份至 $stash）"
+
+    # keyring 是 Chrome 與 VS Code 共用的解密金鑰來源，兩者任一都需要它
+    _force_restore "$HOST_BACKUP/.local/share/keyrings" \
+                   /home/jack/.local/share/keyrings "$stash"
+
+    if [ "$do_chrome" = 1 ]; then
+        _force_restore "$HOST_BACKUP/.config/google-chrome/Local State" \
+                       "$CHROME_DIR/Local State" "$stash"
+        local f
+        for f in "${chrome_profile_plain[@]}" "${chrome_profile_sqlite[@]}"; do
+            _force_restore "$HOST_BACKUP/.config/google-chrome/Default/$f" \
+                           "$CHROME_DIR/Default/$f" "$stash"
+        done
+    fi
+
+    if [ "$do_vscode" = 1 ]; then
+        _force_restore "$HOST_BACKUP/.config/Code/User/globalStorage/state.vscdb" \
+                       "$VSCODE_STATE_DIR/state.vscdb" "$stash"
+    fi
+
+    echo "登入狀態還原完成。keyring 已更換，須登出桌面重新登入才會生效。"
+    return 0
+}
+
 # ── dconf 設定 ─────────────────────────────────────────────────────
 # dconf 的資料存在二進位資料庫中，無法用 rsync 逐項同步，故匯出為文字檔備份。
 # 還原不自動執行：dconf load 會立即改變執行中的桌面設定，且不同機器的
