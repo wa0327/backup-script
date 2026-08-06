@@ -1,0 +1,136 @@
+#!/bin/bash
+
+# sync_dir <源根目錄> <目標根目錄> <子目錄> [排除路徑...]
+# 排除路徑為相對於 <子目錄> 的 rsync --exclude 樣式，用於保護由其他行負責的子路徑
+# 例：sync_dir /var/lib/lxc/jammy/rootfs/home/jack/miniconda3/envs /media/jack/ext4/jammy/home/jack/miniconda3/envs isaaclab
+sync_dir() {
+    local src_root="$1"
+    local dst_root="$2"
+    local sub="$3"
+    shift 3
+
+    local excludes=()
+    local e
+    for e in "$@"; do
+        excludes+=(--exclude "$e")
+    done
+
+    if [ ! -e "$src_root/$sub" ]; then
+        echo "[$sub] 來源不存在，略過"
+        return
+    fi
+
+    if [ ! -e "$dst_root/$sub" ]; then
+        # 目標不存在：第一次，全量搬遷
+        echo "[$sub] 目標不存在，執行全量搬遷"
+        mkdir -p "$dst_root"
+        local tar_excludes=()
+        for e in "$@"; do
+            tar_excludes+=(--exclude "$sub/$e")
+        done
+        # PIPESTATUS 檢查打包端，管線末端的解壓成功不代表來源全部讀得到
+        tar -cf - "${tar_excludes[@]}" -C "$src_root" "$sub" | tar -xpf - -C "$dst_root"
+        local rc=("${PIPESTATUS[@]}")
+        if [ "${rc[0]}" != 0 ] || [ "${rc[1]}" != 0 ]; then
+            echo "[$sub] !! 全量搬遷失敗（tar 打包=${rc[0]} 解壓=${rc[1]}）"
+            failed+=("$sub")
+        fi
+    else
+        echo "[$sub] 目標已存在，執行增量同步"
+        if ! rsync -aHAX --numeric-ids --delete "${excludes[@]}" "$src_root/$sub" "$dst_root/"; then
+            echo "[$sub] !! 增量同步失敗"
+            failed+=("$sub")
+        fi
+    fi
+}
+
+# 記錄失敗項目，結尾統一回報
+failed=()
+
+# 本機若有 lxc jammy 容器：本機身分是 questing host，容器身分是 jammy
+# 本機若沒有 lxc jammy 容器：本機自己就當作 jammy
+if [ -d /var/lib/lxc/jammy/rootfs ]; then
+    has_container=1
+    jammy_root=/var/lib/lxc/jammy/rootfs
+else
+    has_container=0
+    jammy_root=""
+fi
+
+sync_dir "$jammy_root/home/jack/miniconda3/envs" /media/jack/ext4/jammy/home/jack/miniconda3/envs isaaclab
+
+# Omniverse 快取（著色器／材質編譯結果，約 17G）。可重生，但重建耗時甚久，
+# 備份是為了省下 Isaac Sim 首次啟動的編譯時間。
+sync_dir "$jammy_root/home/jack/.cache" /media/jack/ext4/jammy/home/jack/.cache ov
+
+# 飛控原始碼（各約 4G，含 build/ 與未提交的本機修改）
+for d in ardupilot PX4-Autopilot; do
+    sync_dir "$jammy_root/home/jack" /media/jack/ext4/jammy/home/jack "$d"
+done
+# 排除 .claude/memory：該路徑是 mount bind 掛載點，由下一行單獨備份，
+# 若不排除，--delete 會依容器內的空掛載點刪光備份中的 memory
+sync_dir "$jammy_root/home/jack/repos" /media/jack/ext4/jammy/home/jack/repos isaaclab-uav \
+         ".claude/memory"
+
+# Claude memory 屬於 jammy，容器內位置為 repos/isaaclab-uav/.claude/memory（見 lxc.mount.entry），
+# 備份位置比照該佈局，純 jammy 環境才還原得回原處。
+# 在 questing host 上它是 mount bind，容器 rootfs 內看到的是空掛載點，
+# 因此來源必須取 bind 的來源端 /home/jack/.claude/projects/...，
+# 且上面 isaaclab-uav 那行已用 --exclude 排除此路徑，避免 --delete 把它刪掉。
+if [ "$has_container" = 1 ]; then
+    memory_src=/home/jack/.claude/projects/-home-jack-repos-isaaclab-uav   # bind 來源端
+else
+    memory_src="$jammy_root/home/jack/repos/isaaclab-uav/.claude"          # 純 jammy：資料就在原處
+fi
+sync_dir "$memory_src" /media/jack/ext4/jammy/home/jack/repos/isaaclab-uav/.claude memory
+
+# 基本設定檔清單（不存在的會自動略過，所以兩台主機共用一份清單）
+# 刻意不備份：.claude/（GB 級，可重生）、.cargo/.rustup/.local/bin（可重裝）、
+#             .config/Code 與 .config/google-chrome（GB 級快取）、.ros/.mavproxy（多為 log）
+dotfiles=(
+    .ssh .gnupg                       # 私鑰，遺失無法重建
+    .bashrc .profile .bash_aliases .inputrc .selected_editor
+    .gitconfig .git-credentials
+    .condarc                          # conda channel/solver 設定
+    .claude.json                      # Claude Code 全域設定
+    .bash_history .python_history
+    .colcon                           # ROS colcon 設定
+)
+
+# VS Code 個人設定（只取設定本體，避開 3GB 級的快取與 globalStorage）
+vscode_user=(settings.json keybindings.json snippets)
+
+backup_home() {
+    local src_root="$1"   # 該身分的家目錄
+    local dst_root="$2"   # 對應的備份目錄
+
+    local f
+    for f in "${dotfiles[@]}"; do
+        sync_dir "$src_root" "$dst_root" "$f"
+    done
+
+    for f in "${vscode_user[@]}"; do
+        sync_dir "$src_root/.config/Code/User" "$dst_root/.config/Code/User" "$f"
+    done
+}
+
+# jammy（容器或裸機本身）一定備份
+backup_home "$jammy_root/home/jack" /media/jack/ext4/jammy/home/jack
+
+# 有 lxc 容器時，本機是 questing host，額外備份 questing 自己（裸機 /home/jack）
+if [ "$has_container" = 1 ]; then
+    backup_home /home/jack /media/jack/ext4/questing/home/jack
+    # questing 家目錄下自己寫的腳本／設定
+    for f in set_governor.sh isaaclab.json; do
+        sync_dir /home/jack /media/jack/ext4/questing/home/jack "$f"
+    done
+fi
+
+# 確保所有資料真正落到磁碟，避免拔碟時資料還停留在快取
+sync
+
+if [ ${#failed[@]} -gt 0 ]; then
+    echo "!! 備份未完全成功，以下項目失敗：${failed[*]}"
+    exit 1
+fi
+echo "備份完成，已 sync"
