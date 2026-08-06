@@ -384,7 +384,7 @@ personal_dirs=(Desktop Documents Downloads Music Pictures Videos)
 etc_files=(
     fstab                             # 分割區與掛載設定
     default/grub                      # 開機參數
-    default/locale                    # 系統語系
+    locale.conf                       # 系統語系（default/locale 僅為其符號連結）
     sudoers.d/jack                    # sudo 權限設定
 )
 

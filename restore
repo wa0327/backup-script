@@ -13,7 +13,7 @@ usage() {
   --chrome    Chrome 登入狀態（cookie、密碼）與 gnome-keyring
   --vscode    VS Code 登入狀態與 gnome-keyring
   --personal  個人資料（Documents、Downloads、Pictures、Videos…）
-  --etc       /etc/{fstab,default/grub,default/locale,sudoers.d/jack}
+  --etc       /etc/{fstab,default/grub,locale.conf,sudoers.d/jack}
               需 root
   --all       以上全部，另含 .bashrc 等 shell 設定與 Tilix
 
