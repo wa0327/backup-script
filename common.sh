@@ -366,6 +366,8 @@ report() {
 home_files=(
     .ssh                              # 私鑰，遺失無法重建
     .gnupg                            # GPG 私鑰，遺失無法重建
+    .claude/settings.json             # Claude Code 設定。兩環境各自獨立（僅 projects 是 bind），
+                                      # solo 時歸 container，故不列入 solo_owner_host
     .bashrc .profile .bash_aliases .inputrc .xinputrc .selected_editor
     .gitconfig .git-credentials
     .condarc                          # conda channel/solver 設定
