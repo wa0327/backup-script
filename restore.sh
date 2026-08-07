@@ -56,6 +56,11 @@ sync_dir "$CB/.cache" "$C/.cache" ov
 # 飛控原始碼
 sync_files "$CB" "$C" ardupilot PX4-Autopilot
 
+# ROS 2 workspace（build/install/log 需自行重新編譯）
+for w in "${ros_workspaces[@]}"; do
+    sync_dir "$CB" "$C" "$w" "${ros_ws_excludes[@]}"
+done
+
 # ── 兩處的 repos ────────────────────────────────────────────────────
 # 排除 isaaclab-uav/.claude/memory：該路徑在 host 主機上是 mount bind 掛載點，
 # 直接寫入會落在容器 rootfs 的空掛載點而非真正的資料位置。

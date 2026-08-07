@@ -44,10 +44,16 @@ sync_dir() {
     local sub="$3"
     shift 3
 
+    # 傳輸的是 "$src_root/$sub"（不帶結尾斜線），故 rsync 的傳輸根目錄是 sub
+    # 的上層，樣式中的路徑須從 sub 本身算起。開頭的 / 表示錨定，
+    # 不加則會匹配到任何層級的同名項目（例如 src/某套件/build）。
     local excludes=()
     local e
     for e in "$@"; do
-        excludes+=(--exclude "$e")
+        case "$e" in
+            /*) excludes+=(--exclude "/$sub${e}") ;;
+            *)  excludes+=(--exclude "$e") ;;
+        esac
     done
 
     if [ ! -e "$src_root/$sub" ]; then
@@ -61,7 +67,9 @@ sync_dir() {
         mkdir -p "$dst_root"
         local tar_excludes=()
         for e in "$@"; do
-            tar_excludes+=(--exclude "$sub/$e")
+            # rsync 以開頭的 / 表示錨定於傳輸根目錄；tar 的樣式本就相對於
+            # 打包根目錄，故去掉該斜線後接在 sub 之後即為等效的錨定寫法
+            tar_excludes+=(--exclude "$sub/${e#/}")
         done
         # PIPESTATUS 檢查打包端，管線末端的解壓成功不代表來源全部讀得到
         tar -cf - "${tar_excludes[@]}" -C "$src_root" "$sub" | tar -xpf - -C "$dst_root"
@@ -118,28 +126,47 @@ vscode_state_sqlite=(state.vscdb)
 CHROME_DIR=/home/jack/.config/google-chrome
 VSCODE_STATE_DIR=/home/jack/.config/Code/User/globalStorage
 
-# 以 SQLite 備份 API 取一致性快照（來源可為使用中的資料庫）
+# 以 SQLite 備份 API 取一致性快照（來源可為使用中的資料庫）。
+#
+# 逾時是必要的：程式執行中會持有寫入鎖，backup() 遇鎖會不斷重試且無上限，
+# 曾因此卡住整輪備份十餘分鐘而毫無徵兆。逾時後視為該項失敗，不影響其餘項目。
+#
+# 先寫入暫存檔再原子移動，確保逾時或中斷不會在備份端留下殘缺的資料庫 ——
+# 半寫入的檔案大小看似正常，卻要到還原時才會發現壞掉。
+SQLITE_SNAPSHOT_TIMEOUT=60
+
 backup_sqlite() {
-    local src="$1" dst="$2"
+    local src="$1" dst="$2" tmp rc
     if [ ! -e "$src" ]; then
         echo "[$(basename "$src")] 來源不存在，略過"
         return
     fi
     mkdir -p "$(dirname "$dst")"
-    if python3 - "$src" "$dst" <<'PY' 2>/dev/null
+    tmp="$dst.tmp.$$"
+
+    timeout "$SQLITE_SNAPSHOT_TIMEOUT" python3 - "$src" "$tmp" <<'PY' 2>/dev/null
 import sqlite3, sys
 src, dst = sys.argv[1], sys.argv[2]
-s = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
-d = sqlite3.connect(dst)
-s.backup(d)
+# timeout 讓取鎖失敗時拋出例外而非無限重試；sleep 縮短重試間隔
+s = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=10)
+d = sqlite3.connect(dst, timeout=10)
+s.backup(d, sleep=0.1)
 d.close(); s.close()
 PY
-    then
+    rc=$?
+
+    if [ "$rc" = 0 ]; then
         # python 建檔套用預設 umask，須比照來源收緊：內含 session token
-        chmod --reference="$src" "$dst" 2>/dev/null || chmod 600 "$dst"
+        chmod --reference="$src" "$tmp" 2>/dev/null || chmod 600 "$tmp"
+        mv -f "$tmp" "$dst"
         echo "[$(basename "$src")] 已取一致性快照"
     else
-        echo "[$(basename "$src")] !! SQLite 快照失敗"
+        rm -f "$tmp"
+        if [ "$rc" = 124 ]; then
+            echo "[$(basename "$src")] !! 逾時 ${SQLITE_SNAPSHOT_TIMEOUT}s（資料庫被鎖住，請關閉對應程式），保留既有備份"
+        else
+            echo "[$(basename "$src")] !! SQLite 快照失敗（rc=$rc），保留既有備份"
+        fi
         failed+=("$(basename "$src")")
     fi
 }
@@ -381,6 +408,15 @@ vscode_user=(settings.json keybindings.json snippets)
 
 # 個人資料目錄。host 與 container 各有一份，內容不同，故兩邊分別備份。
 personal_dirs=(Desktop Documents Downloads Music Pictures Videos)
+
+# container 的 ROS 2 workspace。整個目錄都備，僅排除編譯產物 —— 採排除法
+# 而非列舉 src/，是因為根目錄還有 gimbal-middleware、autorun 等非 git 且
+# 無其他副本的內容，列舉法漏掉不會有任何跡象，寧可多備也不要靜默漏備。
+ros_workspaces=(ws_avix ws_base ws_gimbal ws_hawkeye)
+
+# 開頭的 / 表示只排除 workspace 頂層的同名目錄，
+# 以免誤刪 src/ 內某個套件自己的 build/ 或 log/
+ros_ws_excludes=(/build /install /log)
 
 # host 的系統設定檔。備份到 host/etc/，還原須自行以 root 放回。
 etc_files=(

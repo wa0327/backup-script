@@ -17,6 +17,11 @@ sync_dir "$C/.cache" "$CB/.cache" ov
 # 飛控原始碼（各約 4G，含 build/ 與未提交的本機修改）
 sync_files "$C" "$CB" ardupilot PX4-Autopilot
 
+# ROS 2 workspace：整包備份，僅排除頂層的 build/install/log
+for w in "${ros_workspaces[@]}"; do
+    sync_dir "$C" "$CB" "$w" "${ros_ws_excludes[@]}"
+done
+
 # ── 兩處的 repos ────────────────────────────────────────────────────
 # 整個 repos 目錄都備份，內含未提交的本機修改，git clone 取不回來。
 # 排除 isaaclab-uav/.claude/memory：該路徑是 mount bind 掛載點，容器 rootfs
