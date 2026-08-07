@@ -7,15 +7,16 @@ usage() {
 用法：restore [--chrome] [--vscode] [--personal] [--etc] [--all]
 
 不加參數時只還原程式碼與設定檔。會直接改變環境或需 root 的項目
-（.bashrc、.profile、.bash_aliases、Tilix、登入狀態、個人資料、
-/etc）僅列出提示，不會動到。
+（.bash_aliases、Tilix、登入狀態、個人資料、/etc）僅列出提示。
+.bashrc 與 .profile 一律只提示不還原，即使加 --all 也一樣，
+因其幾乎必定含該機專屬內容，須逐段比對後自行複製。
 
   --chrome    Chrome 登入狀態（cookie、密碼）與 gnome-keyring
   --vscode    VS Code 登入狀態與 gnome-keyring
   --personal  個人資料（Documents、Downloads、Pictures、Videos…）
   --etc       /etc/{fstab,default/grub,locale.conf,sudoers.d/jack}
               需 root
-  --all       以上全部，另含 .bashrc 等 shell 設定與 Tilix
+  --all       以上全部，另含 .bash_aliases 與 Tilix
 
 登入狀態與 /etc 為整組覆寫，不保留原檔；個人資料則只補不刪、
 本機較新者不覆蓋。--chrome／--vscode 執行前須先完全關閉對應程式，

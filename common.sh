@@ -388,11 +388,24 @@ etc_files=(
     sudoers.d/jack                    # sudo 權限設定
 )
 
-# 只備份、不自動還原的檔案。還原時跳過並提示備份檔位置，由人工比對後決定
-# 要不要套用 —— 這些檔案一旦被覆蓋會直接改變 shell 環境，且各機器常有
-# 針對該機的差異（PATH、conda 初始化、機器專屬 alias），不宜整份蓋過去。
+# 一律只備份、絕不自動還原（--all 亦然），僅提示備份檔位置供人工複製。
+# 這兩個檔幾乎必定含該機專屬內容（PATH、conda 初始化、硬體相關設定），
+# 整份覆蓋等於把另一台機器的環境搬過來，得逐段比對才安全。
+never_restore=(
+    .bashrc .profile
+)
+
+is_never_restore() {
+    local f="$1" w
+    for w in "${never_restore[@]}"; do
+        [ "$f" = "$w" ] && return 0
+    done
+    return 1
+}
+
+# 預設不自動還原，但 --all 時會一併還原。
 no_auto_restore=(
-    .bashrc .profile .bash_aliases
+    .bash_aliases
 )
 
 is_no_auto_restore() {
@@ -459,8 +472,10 @@ _sync_one() {
     local dir="$1" home="$2" backup="$3" f="$4"
     if [ "$dir" = to_backup ]; then
         sync_dir "$home" "$backup" "$f"
+    elif is_never_restore "$f"; then
+        # --all 也不還原；僅在備份端確實有東西可複製時才提示
+        [ -e "$backup/$f" ] && manual+=("（一律手動）$backup/$f  →  $home/$f")
     elif is_no_auto_restore "$f" && [ "${force_all:-0}" != 1 ]; then
-        # 僅在備份端確實有東西可還原時才提示，否則安靜跳過
         [ -e "$backup/$f" ] && manual+=("$backup/$f  →  $home/$f")
     elif is_no_auto_restore "$f"; then
         _force_restore "$backup/$f" "$home/$f"
