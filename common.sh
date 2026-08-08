@@ -15,7 +15,22 @@ case "$RSYNC_MODE" in
     *) echo "common.sh: 未設定 RSYNC_MODE（backup|restore）" >&2; exit 1 ;;
 esac
 
-BACKUP_ROOT=/media/jack/ext4
+# 備份根目錄。此碟依系統而掛載於兩處其一，兩者只會出現一個，故逐一嘗試。
+# 不寫死單一路徑：寫死會在掛載點改變時，靜默把備份寫進系統碟上一個新建的
+# 同名目錄，與碟上既有備份完全脫節。
+# 以 mountpoint 判斷而非僅檢查目錄存在，否則碟未掛載時會誤選到空的掛載點。
+BACKUP_ROOT=""
+for d in /media/jack/ext4 /run/media/jack/ext4; do
+    if mountpoint -q "$d" 2>/dev/null; then
+        BACKUP_ROOT="$d"
+        break
+    fi
+done
+if [ -z "$BACKUP_ROOT" ]; then
+    echo "common.sh: 備份碟未掛載於 /media/jack/ext4 或 /run/media/jack/ext4" >&2
+    exit 1
+fi
+
 HOST_BACKUP="$BACKUP_ROOT/host/home/jack"
 CONTAINER_BACKUP="$BACKUP_ROOT/container/home/jack"
 
@@ -395,6 +410,8 @@ home_files=(
     .gnupg                            # GPG 私鑰，遺失無法重建
     .claude/settings.json             # Claude Code 設定。兩環境各自獨立（僅 projects 是 bind），
                                       # solo 時歸 container，故不列入 solo_owner_host
+    .config/fontconfig/conf.d         # 中日韓字型優先序（99-prefer-cjk-tc.conf），
+                                      # 缺此漢字會被日文字型取代
     .bashrc .profile .bash_aliases .inputrc .xinputrc .selected_editor
     .gitconfig .git-credentials
     .condarc                          # conda channel/solver 設定
@@ -460,6 +477,7 @@ is_no_auto_restore() {
 solo_owner_host=(
     .gnupg                            # GPG 金鑰圈掛在實體主機
     .xinputrc                         # 輸入法屬桌面環境
+    .config/fontconfig/conf.d         # 字型算繪屬桌面環境
     set_governor.sh                   # CPU 調頻，操作實體硬體
     __vscode__                        # VS Code GUI 設定，見 _sync_vscode
 )
