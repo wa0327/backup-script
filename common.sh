@@ -3,7 +3,8 @@
 # 環境術語：
 #   host      實體主機（原 questing），跑 lxc 容器的那台
 #   container lxc 容器（原 jammy），開發環境所在
-#   solo      單一環境主機：沒有容器，一台機器就是全部。視同 container。
+#   single    單一環境主機：沒有容器，一台機器就是全部。視同 container。
+#   dual      雙環境主機：host 與 container 並存
 #
 # 呼叫端須先設定 RSYNC_MODE：
 #   backup  → 備份為本機的鏡像，用 --delete 使備份不致堆積已刪除的檔案
@@ -34,16 +35,41 @@ fi
 HOST_BACKUP="$BACKUP_ROOT/host/home/jack"
 CONTAINER_BACKUP="$BACKUP_ROOT/container/home/jack"
 
-# 有 lxc 容器者為 host（另含 container）；沒有者為 solo，視同 container。
+# 有 lxc 容器者為 dual（host 與 container 並存）；沒有者為 single，視同 container。
 if [ -d /var/lib/lxc/jammy/rootfs ]; then
-    is_solo=0
+    is_single=0
     container_root=/var/lib/lxc/jammy/rootfs
 else
-    is_solo=1
-    container_root=""          # solo：容器家目錄即本機家目錄
+    is_single=1
+    container_root=""          # single：容器家目錄即本機家目錄
 fi
 CONTAINER_HOME="$container_root/home/jack"
-HOST_HOME=/home/jack           # solo 時與 CONTAINER_HOME 同為 /home/jack
+HOST_HOME=/home/jack           # single 時與 CONTAINER_HOME 同為 /home/jack
+
+# ── 備份分類 ────────────────────────────────────────────────────────
+# 每類可獨立選取。未給任何參數時由 backup.sh 互動式詢問。
+CATEGORIES=(system app claude repos personal)
+
+category_desc() {
+    case "$1" in
+        system)   echo "系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、字型）" ;;
+        app)      echo "應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix）" ;;
+        claude)   echo "Claude Code（專案紀錄與 memory、settings.json）" ;;
+        repos)    echo "程式碼與開發環境（repos、飛控、ROS workspace、conda、Omniverse 快取）" ;;
+        personal) echo "個人資料（Documents、Downloads、Pictures、Videos…）" ;;
+    esac
+}
+
+# 選取的分類，由呼叫端填入
+selected=()
+
+want() {
+    local c
+    for c in "${selected[@]}"; do
+        [ "$c" = "$1" ] && return 0
+    done
+    return 1
+}
 
 # 記錄失敗項目，由呼叫端在結尾統一回報
 failed=()
@@ -125,7 +151,7 @@ sync_files() {
 #   VS Code 的 token 同樣經 Secret Service 存入 keyring。
 # 因此 keyrings/ 必須與應用程式資料一併備份，缺一則還原後等同未登入。
 #
-# 一律歸 host：瀏覽器與 GUI 編輯器屬桌面環境，solo 主機亦同。
+# 一律歸 host：瀏覽器與 GUI 編輯器屬桌面環境，single 主機亦同。
 #
 # 執行中的 SQLite 直接複製可能取到寫入中的殘缺狀態，故以 SQLite 備份 API
 # 取一致性快照；其餘為 JSON 或二進位檔，直接同步即可。
@@ -222,17 +248,10 @@ _force_restore() {
     fi
 }
 
-# 還原登入狀態。預設只提示不執行 —— keyring 覆蓋會連帶清掉本機自己的密碼，
-# Chrome／VS Code 的資料庫在程式執行中被覆寫會損毀設定。
-# 須由 restore 以 --chrome／--vscode 明確指定才會實際執行，且會先確認程式已關閉。
+# 還原登入狀態。選取 app 分類即為明確授權，但仍會擋下執行中的程式 ——
+# keyring 覆蓋會連帶清掉本機自己的密碼，資料庫在程式執行中被覆寫會損毀設定。
 restore_session_state() {
-    local do_chrome="$1" do_vscode="$2" running
-
-    if [ "$do_chrome" = 0 ] && [ "$do_vscode" = 0 ]; then
-        [ -e "$HOST_BACKUP/.local/share/keyrings" ] &&
-            manual+=("keyring／Chrome／VS Code 登入狀態：加 --chrome 或 --vscode 才會還原")
-        return 0
-    fi
+    local do_chrome=1 do_vscode=1 running
 
     # 程式執行中覆寫資料庫會損毀設定，先擋下。
     # 樣式錨定於 command line 開頭，否則任何「提到」該路徑的指令（含本腳本
@@ -284,31 +303,20 @@ restore_session_state() {
 # 個人資料量大且可能已在本機編輯過，故沿用一般還原語意（只補不刪、
 # 目標較新者不覆蓋），而非登入狀態那種整組覆寫。
 restore_personal() {
-    local apply="$1"
-    if [ "$apply" != 1 ]; then
-        manual+=("個人資料（${personal_dirs[*]}）：加 --personal 才會還原")
-        return 0
-    fi
     sync_files "$CONTAINER_BACKUP" "$CONTAINER_HOME" "${personal_dirs[@]}"
-    if [ "$is_solo" = 0 ]; then
+    if [ "$is_single" = 0 ]; then
         sync_files "$HOST_BACKUP" "$HOST_HOME" "${personal_dirs[@]}"
     fi
 }
 
-# /etc 與 lxc 設定需 root 才能寫入，且會影響開機與權限，故預設只提示。
+# /etc 需 root 才能寫入，且會影響開機與權限。
 # lxc 容器定義檔不在此處理：它是指向 repos/lxc-config/jammy 的符號連結，
 # 實檔隨 repos 還原即可，只需重建該連結。
 restore_etc() {
-    local apply="$1" f src
-
-    if [ "$apply" != 1 ]; then
-        [ -d "$BACKUP_ROOT/host/etc" ] &&
-            manual+=("（需 root）$BACKUP_ROOT/host/etc/  →  /etc/：加 --etc 才會還原")
-        return 0
-    fi
+    local f src
 
     if ! sudo -n true 2>/dev/null; then
-        echo "!! --etc 需要 root 權限，請以可 sudo 的身分執行"
+        echo "!! 還原 /etc 需要 root 權限，請以可 sudo 的身分執行"
         failed+=("etc：無 root 權限")
         return 0
     fi
@@ -352,15 +360,11 @@ backup_dconf() {
     fi
 }
 
-# $3 為 1 時直接套用（--all），否則僅提示指令
+# 選取 app 分類即為授權，直接套用至執行中的桌面
 restore_dconf() {
-    local path="$1" file="$2" apply="${3:-0}"
+    local path="$1" file="$2"
     if [ ! -e "$file" ]; then
         echo "[$(basename "$file")] 備份不存在，略過"
-        return
-    fi
-    if [ "$apply" != 1 ]; then
-        manual+=("dconf load $path < $file")
         return
     fi
     if dconf load "$path" <"$file" 2>/dev/null; then
@@ -394,22 +398,21 @@ report() {
 # ── 家目錄設定檔清單 ────────────────────────────────────────────────
 # host 與 container 各有一份家目錄，同名檔案內容不同，須分開備份。
 #
-# host 主機（host + container 並存）：完整清單對兩個家目錄各跑一次，
+# dual 主機（host 與 container 並存）：完整清單對兩個家目錄各跑一次，
 #   備份到各自目錄，還原亦原路還原，無須裁決。
 #
-# solo 主機（家目錄只有一份）：ext4 下 host/ 與 container/ 皆有同名檔案，
-#   必須裁決本機這一份對應哪邊。solo_owner_host 即為該裁決表，
-#   未列出者一律歸 container（solo 視同 container）。
+# single 主機（家目錄只有一份）：ext4 下 host/ 與 container/ 皆有同名檔案，
+#   必須裁決本機這一份對應哪邊。single_owner_host 即為該裁決表，
+#   未列出者一律歸 container（single 視同 container）。
 #
 # 刻意不備份：.cargo/.rustup/.local/bin（可重裝）、
 #             .config/Code 與 .config/google-chrome（GB 級快取）、.ros/.mavproxy（多為 log）
 
-# 家目錄設定檔完整清單。host 主機上兩個家目錄都套用這份清單。
-home_files=(
+# 家目錄設定檔，依分類拆開。dual 主機上兩個家目錄都套用這些清單。
+# system 類：shell 與作業系統層級的設定
+system_files=(
     .ssh                              # 私鑰，遺失無法重建
     .gnupg                            # GPG 私鑰，遺失無法重建
-    .claude/settings.json             # Claude Code 設定。兩環境各自獨立（僅 projects 是 bind），
-                                      # solo 時歸 container，故不列入 solo_owner_host
     .config/fontconfig/conf.d         # 中日韓字型優先序（99-prefer-cjk-tc.conf），
                                       # 缺此漢字會被日文字型取代
     .bashrc .profile .bash_aliases .inputrc .xinputrc .selected_editor
@@ -419,6 +422,15 @@ home_files=(
     .colcon                           # ROS colcon 設定
     set_governor.sh                   # 家目錄下自己寫的腳本
 )
+
+# claude 類：Claude Code 的家目錄設定
+claude_files=(
+    .claude/settings.json             # 兩環境各自獨立（僅 projects 是 bind），
+                                      # single 時歸 container，故不列入 single_owner_host
+)
+
+# 供 single 裁決與還原判斷用的完整清單
+home_files=("${system_files[@]}" "${claude_files[@]}")
 
 # VS Code 個人設定（只取設定本體，避開 3GB 級的快取與 globalStorage）
 vscode_user=(settings.json keybindings.json snippets)
@@ -471,10 +483,10 @@ is_no_auto_restore() {
     return 1
 }
 
-# ── solo 裁決表 ────────────────────────────────────────────────────
-# 僅在 solo 主機生效。列於此者歸 host，其餘一律歸 container。
+# ── single 裁決表 ────────────────────────────────────────────────────
+# 僅在 single 主機生效。列於此者歸 host，其餘一律歸 container。
 # 判準：該檔案屬於桌面／實體主機環境，而非容器內的開發環境。
-solo_owner_host=(
+single_owner_host=(
     .gnupg                            # GPG 金鑰圈掛在實體主機
     .xinputrc                         # 輸入法屬桌面環境
     .config/fontconfig/conf.d         # 字型算繪屬桌面環境
@@ -482,17 +494,17 @@ solo_owner_host=(
     __vscode__                        # VS Code GUI 設定，見 _sync_vscode
 )
 
-# 判斷某檔案在 solo 主機上是否歸 host
+# 判斷某檔案在 single 主機上是否歸 host
 is_host_file() {
     local f="$1" w
-    for w in "${solo_owner_host[@]}"; do
+    for w in "${single_owner_host[@]}"; do
         [ "$f" = "$w" ] && return 0
     done
     return 1
 }
 
-# 依裁決表回傳某檔案在 solo 主機上該用的備份目錄
-solo_backup_dir() {
+# 依裁決表回傳某檔案在 single 主機上該用的備份目錄
+single_backup_dir() {
     if is_host_file "$1"; then
         echo "$HOST_BACKUP"
     else
@@ -501,26 +513,38 @@ solo_backup_dir() {
 }
 
 # ── 家目錄設定檔的同步 ──────────────────────────────────────────────
-# host 主機：兩個家目錄各自對應自己的備份目錄，全部檔案都跑。
-# solo 主機：家目錄只有一份，逐檔依裁決表決定要對應哪個備份目錄。
+# dual 主機：兩個家目錄各自對應自己的備份目錄，全部檔案都跑。
+# single 主機：家目錄只有一份，逐檔依裁決表決定要對應哪個備份目錄。
 # $1 為方向：to_backup（備份）或 to_home（還原）
 # $2 為 1 時，連 no_auto_restore 清單內的檔案也一併還原（--all）
+# $2 起為要處理的檔案清單，未給則沿用完整的 home_files
 sync_home_files() {
     local dir="$1" f
-    force_all="${2:-0}"
+    shift
+    local files=("$@")
+    [ ${#files[@]} -eq 0 ] && files=("${home_files[@]}")
 
-    if [ "$is_solo" = 0 ]; then
-        for f in "${home_files[@]}"; do
+    if [ "$is_single" = 0 ]; then
+        for f in "${files[@]}"; do
             _sync_one "$dir" "$CONTAINER_HOME" "$CONTAINER_BACKUP" "$f"
             _sync_one "$dir" "$HOST_HOME"      "$HOST_BACKUP"      "$f"
         done
+    else
+        for f in "${files[@]}"; do
+            _sync_one "$dir" "$HOST_HOME" "$(single_backup_dir "$f")" "$f"
+        done
+    fi
+}
+
+# VS Code 的個人設定另外處理：其路徑在 .config/Code/User 之下，與家目錄
+# 頂層的檔案不同層，且歸屬固定為 app 類
+sync_vscode_user() {
+    local dir="$1"
+    if [ "$is_single" = 0 ]; then
         _sync_vscode "$dir" "$CONTAINER_HOME" "$CONTAINER_BACKUP"
         _sync_vscode "$dir" "$HOST_HOME"      "$HOST_BACKUP"
     else
-        for f in "${home_files[@]}"; do
-            _sync_one "$dir" "$HOST_HOME" "$(solo_backup_dir "$f")" "$f"
-        done
-        _sync_vscode "$dir" "$HOST_HOME" "$(solo_backup_dir __vscode__)"
+        _sync_vscode "$dir" "$HOST_HOME" "$(single_backup_dir __vscode__)"
     fi
 }
 
@@ -529,11 +553,10 @@ _sync_one() {
     if [ "$dir" = to_backup ]; then
         sync_dir "$home" "$backup" "$f"
     elif is_never_restore "$f"; then
-        # --all 也不還原；僅在備份端確實有東西可複製時才提示
+        # 選了分類也不還原；僅在備份端確實有東西可複製時才提示
         [ -e "$backup/$f" ] && manual+=("（一律手動）$backup/$f  →  $home/$f")
-    elif is_no_auto_restore "$f" && [ "${force_all:-0}" != 1 ]; then
-        [ -e "$backup/$f" ] && manual+=("$backup/$f  →  $home/$f")
     elif is_no_auto_restore "$f"; then
+        # 選取分類即為明確授權，故直接以備份端覆蓋
         _force_restore "$backup/$f" "$home/$f"
     else
         sync_dir "$backup" "$home" "$f"
