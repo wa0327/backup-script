@@ -1,10 +1,11 @@
 # backup 與 restore 共用的定義。由 backup.sh 與 restore.sh source，不單獨執行。
 #
-# 環境術語：
-#   host      實體主機（原 questing），跑 lxc 容器的那台
-#   container lxc 容器（原 jammy），開發環境所在
-#   single    單一環境主機：沒有容器，一台機器就是全部。視同 container。
-#   dual      雙環境主機：host 與 container 並存
+# 原本 host（實體主機）與 container（lxc 容器）為兩個獨立環境，各有一份家目錄，
+# 備份分存於 ext4 下的 host/ 與 container/。container 升級後兩者已融合為單一
+# 主機，故不再區分：本機直接對應 container，備份一律寫入 container/。
+# 目錄名沿用 container 是因為它代表角色而非發行版名稱，升級不改變其歸屬。
+#
+# ext4 下的 host/ 保留為舊實體主機的歷史備份，本腳本不再讀寫。
 #
 # 呼叫端須先設定 RSYNC_MODE：
 #   backup  → 備份為本機的鏡像，用 --delete 使備份不致堆積已刪除的檔案
@@ -32,19 +33,8 @@ if [ -z "$BACKUP_ROOT" ]; then
     exit 1
 fi
 
-HOST_BACKUP="$BACKUP_ROOT/host/home/jack"
-CONTAINER_BACKUP="$BACKUP_ROOT/container/home/jack"
-
-# 有 lxc 容器者為 dual（host 與 container 並存）；沒有者為 single，視同 container。
-if [ -d /var/lib/lxc/jammy/rootfs ]; then
-    is_single=0
-    container_root=/var/lib/lxc/jammy/rootfs
-else
-    is_single=1
-    container_root=""          # single：容器家目錄即本機家目錄
-fi
-CONTAINER_HOME="$container_root/home/jack"
-HOST_HOME=/home/jack           # single 時與 CONTAINER_HOME 同為 /home/jack
+BACKUP="$BACKUP_ROOT/container/home/jack"   # 本機唯一的備份目的地
+HOME_DIR=/home/jack                          # 本機唯一的家目錄
 
 # ── 備份分類 ────────────────────────────────────────────────────────
 # 每類可獨立選取。未給任何參數時由 backup.sh 互動式詢問。
@@ -151,8 +141,6 @@ sync_files() {
 #   VS Code 的 token 同樣經 Secret Service 存入 keyring。
 # 因此 keyrings/ 必須與應用程式資料一併備份，缺一則還原後等同未登入。
 #
-# 一律歸 host：瀏覽器與 GUI 編輯器屬桌面環境，single 主機亦同。
-#
 # 執行中的 SQLite 直接複製可能取到寫入中的殘缺狀態，故以 SQLite 備份 API
 # 取一致性快照；其餘為 JSON 或二進位檔，直接同步即可。
 
@@ -216,21 +204,21 @@ PY
 backup_session_state() {
     local f
     # gnome-keyring：Chrome／VS Code 的解密金鑰所在，缺此則其餘備份無效
-    sync_dir /home/jack/.local/share "$HOST_BACKUP/.local/share" keyrings
+    sync_dir /home/jack/.local/share "$BACKUP/.local/share" keyrings
 
     for f in "${chrome_root_plain[@]}"; do
-        sync_dir "$CHROME_DIR" "$HOST_BACKUP/.config/google-chrome" "$f"
+        sync_dir "$CHROME_DIR" "$BACKUP/.config/google-chrome" "$f"
     done
     for f in "${chrome_profile_plain[@]}"; do
-        sync_dir "$CHROME_DIR/Default" "$HOST_BACKUP/.config/google-chrome/Default" "$f"
+        sync_dir "$CHROME_DIR/Default" "$BACKUP/.config/google-chrome/Default" "$f"
     done
     for f in "${chrome_profile_sqlite[@]}"; do
         backup_sqlite "$CHROME_DIR/Default/$f" \
-                      "$HOST_BACKUP/.config/google-chrome/Default/$f"
+                      "$BACKUP/.config/google-chrome/Default/$f"
     done
     for f in "${vscode_state_sqlite[@]}"; do
         backup_sqlite "$VSCODE_STATE_DIR/$f" \
-                      "$HOST_BACKUP/.config/Code/User/globalStorage/$f"
+                      "$BACKUP/.config/Code/User/globalStorage/$f"
     done
 }
 
@@ -277,21 +265,21 @@ restore_session_state() {
     echo "還原登入狀態（直接覆蓋，不保留原檔）"
 
     # keyring 是 Chrome 與 VS Code 共用的解密金鑰來源，兩者任一都需要它
-    _force_restore "$HOST_BACKUP/.local/share/keyrings" \
+    _force_restore "$BACKUP/.local/share/keyrings" \
                    /home/jack/.local/share/keyrings
 
     if [ "$do_chrome" = 1 ]; then
-        _force_restore "$HOST_BACKUP/.config/google-chrome/Local State" \
+        _force_restore "$BACKUP/.config/google-chrome/Local State" \
                        "$CHROME_DIR/Local State"
         local f
         for f in "${chrome_profile_plain[@]}" "${chrome_profile_sqlite[@]}"; do
-            _force_restore "$HOST_BACKUP/.config/google-chrome/Default/$f" \
+            _force_restore "$BACKUP/.config/google-chrome/Default/$f" \
                            "$CHROME_DIR/Default/$f"
         done
     fi
 
     if [ "$do_vscode" = 1 ]; then
-        _force_restore "$HOST_BACKUP/.config/Code/User/globalStorage/state.vscdb" \
+        _force_restore "$BACKUP/.config/Code/User/globalStorage/state.vscdb" \
                        "$VSCODE_STATE_DIR/state.vscdb"
     fi
 
@@ -303,10 +291,7 @@ restore_session_state() {
 # 個人資料量大且可能已在本機編輯過，故沿用一般還原語意（只補不刪、
 # 目標較新者不覆蓋），而非登入狀態那種整組覆寫。
 restore_personal() {
-    sync_files "$CONTAINER_BACKUP" "$CONTAINER_HOME" "${personal_dirs[@]}"
-    if [ "$is_single" = 0 ]; then
-        sync_files "$HOST_BACKUP" "$HOST_HOME" "${personal_dirs[@]}"
-    fi
+    sync_files "$BACKUP" "$HOME_DIR" "${personal_dirs[@]}"
 }
 
 # /etc 需 root 才能寫入，且會影響開機與權限。
@@ -323,7 +308,7 @@ restore_etc() {
 
     echo "還原系統設定（直接覆蓋，不保留原檔）"
     for f in "${etc_files[@]}"; do
-        src="$BACKUP_ROOT/host/etc/$f"
+        src="$BACKUP_ROOT/container/etc/$f"
         if [ ! -e "$src" ]; then
             echo "  [$f] 備份不存在，略過"
             continue
@@ -396,19 +381,12 @@ report() {
 }
 
 # ── 家目錄設定檔清單 ────────────────────────────────────────────────
-# host 與 container 各有一份家目錄，同名檔案內容不同，須分開備份。
-#
-# dual 主機（host 與 container 並存）：完整清單對兩個家目錄各跑一次，
-#   備份到各自目錄，還原亦原路還原，無須裁決。
-#
-# single 主機（家目錄只有一份）：ext4 下 host/ 與 container/ 皆有同名檔案，
-#   必須裁決本機這一份對應哪邊。single_owner_host 即為該裁決表，
-#   未列出者一律歸 container（single 視同 container）。
+# 環境融合後家目錄只有一份，全部備份到 container/，無須裁決歸屬。
 #
 # 刻意不備份：.cargo/.rustup/.local/bin（可重裝）、
 #             .config/Code 與 .config/google-chrome（GB 級快取）、.ros/.mavproxy（多為 log）
 
-# 家目錄設定檔，依分類拆開。dual 主機上兩個家目錄都套用這些清單。
+# 家目錄設定檔，依分類拆開。
 # system 類：shell 與作業系統層級的設定
 system_files=(
     .ssh                              # 私鑰，遺失無法重建
@@ -425,20 +403,18 @@ system_files=(
 
 # claude 類：Claude Code 的家目錄設定
 claude_files=(
-    .claude/settings.json             # 兩環境各自獨立（僅 projects 是 bind），
-                                      # single 時歸 container，故不列入 single_owner_host
+    .claude/settings.json
 )
 
-# 供 single 裁決與還原判斷用的完整清單
+# 供還原判斷用的完整清單
 home_files=("${system_files[@]}" "${claude_files[@]}")
 
 # VS Code 個人設定（只取設定本體，避開 3GB 級的快取與 globalStorage）
 vscode_user=(settings.json keybindings.json snippets)
 
-# 個人資料目錄。host 與 container 各有一份，內容不同，故兩邊分別備份。
 personal_dirs=(Desktop Documents Downloads Music Pictures Videos)
 
-# container 的 ROS 2 workspace。整個目錄都備，僅排除編譯產物 —— 採排除法
+# ROS 2 workspace。整個目錄都備，僅排除編譯產物 —— 採排除法
 # 而非列舉 src/，是因為根目錄還有 gimbal-middleware、autorun 等非 git 且
 # 無其他副本的內容，列舉法漏掉不會有任何跡象，寧可多備也不要靜默漏備。
 ros_workspaces=(ws_avix ws_base ws_gimbal ws_hawkeye)
@@ -447,7 +423,7 @@ ros_workspaces=(ws_avix ws_base ws_gimbal ws_hawkeye)
 # 以免誤刪 src/ 內某個套件自己的 build/ 或 log/
 ros_ws_excludes=(/build /install /log)
 
-# host 的系統設定檔。備份到 host/etc/，還原須自行以 root 放回。
+# 系統設定檔。備份到 container/etc/，還原須自行以 root 放回。
 etc_files=(
     fstab                             # 分割區與掛載設定
     default/grub                      # 開機參數
@@ -483,40 +459,8 @@ is_no_auto_restore() {
     return 1
 }
 
-# ── single 裁決表 ────────────────────────────────────────────────────
-# 僅在 single 主機生效。列於此者歸 host，其餘一律歸 container。
-# 判準：該檔案屬於桌面／實體主機環境，而非容器內的開發環境。
-single_owner_host=(
-    .gnupg                            # GPG 金鑰圈掛在實體主機
-    .xinputrc                         # 輸入法屬桌面環境
-    .config/fontconfig/conf.d         # 字型算繪屬桌面環境
-    set_governor.sh                   # CPU 調頻，操作實體硬體
-    __vscode__                        # VS Code GUI 設定，見 _sync_vscode
-)
-
-# 判斷某檔案在 single 主機上是否歸 host
-is_host_file() {
-    local f="$1" w
-    for w in "${single_owner_host[@]}"; do
-        [ "$f" = "$w" ] && return 0
-    done
-    return 1
-}
-
-# 依裁決表回傳某檔案在 single 主機上該用的備份目錄
-single_backup_dir() {
-    if is_host_file "$1"; then
-        echo "$HOST_BACKUP"
-    else
-        echo "$CONTAINER_BACKUP"
-    fi
-}
-
 # ── 家目錄設定檔的同步 ──────────────────────────────────────────────
-# dual 主機：兩個家目錄各自對應自己的備份目錄，全部檔案都跑。
-# single 主機：家目錄只有一份，逐檔依裁決表決定要對應哪個備份目錄。
 # $1 為方向：to_backup（備份）或 to_home（還原）
-# $2 為 1 時，連 no_auto_restore 清單內的檔案也一併還原（--all）
 # $2 起為要處理的檔案清單，未給則沿用完整的 home_files
 sync_home_files() {
     local dir="$1" f
@@ -524,28 +468,15 @@ sync_home_files() {
     local files=("$@")
     [ ${#files[@]} -eq 0 ] && files=("${home_files[@]}")
 
-    if [ "$is_single" = 0 ]; then
-        for f in "${files[@]}"; do
-            _sync_one "$dir" "$CONTAINER_HOME" "$CONTAINER_BACKUP" "$f"
-            _sync_one "$dir" "$HOST_HOME"      "$HOST_BACKUP"      "$f"
-        done
-    else
-        for f in "${files[@]}"; do
-            _sync_one "$dir" "$HOST_HOME" "$(single_backup_dir "$f")" "$f"
-        done
-    fi
+    for f in "${files[@]}"; do
+        _sync_one "$dir" "$HOME_DIR" "$BACKUP" "$f"
+    done
 }
 
-# VS Code 的個人設定另外處理：其路徑在 .config/Code/User 之下，與家目錄
-# 頂層的檔案不同層，且歸屬固定為 app 類
+# VS Code 的個人設定另外處理：其路徑在 .config/Code/User 之下，
+# 與家目錄頂層的檔案不同層
 sync_vscode_user() {
-    local dir="$1"
-    if [ "$is_single" = 0 ]; then
-        _sync_vscode "$dir" "$CONTAINER_HOME" "$CONTAINER_BACKUP"
-        _sync_vscode "$dir" "$HOST_HOME"      "$HOST_BACKUP"
-    else
-        _sync_vscode "$dir" "$HOST_HOME" "$(single_backup_dir __vscode__)"
-    fi
+    _sync_vscode "$1" "$HOME_DIR" "$BACKUP"
 }
 
 _sync_one() {

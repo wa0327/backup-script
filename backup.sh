@@ -69,8 +69,8 @@ fi
 echo "備份分類：${selected[*]}"
 echo
 
-C="$CONTAINER_HOME"              # container 家目錄（single 時即本機家目錄）
-CB="$CONTAINER_BACKUP"
+C="$HOME_DIR"
+CB="$BACKUP"
 
 # ── repos：程式碼與開發環境 ─────────────────────────────────────────
 if want repos; then
@@ -89,35 +89,28 @@ if want repos; then
     done
 
     # 整個 repos 目錄都備份，內含未提交的本機修改，git clone 取不回來。
-    # 排除 isaaclab-uav/.claude/memory：該路徑是 mount bind 掛載點，容器 rootfs
-    # 內僅為空掛載點，其實際資料已包含在 claude 分類的 .claude/projects 備份中。
+    # 排除 isaaclab-uav/.claude/memory：該路徑是指向 .claude/projects 之下的
+    # mount bind，其資料已由 claude 分類的 projects 備份涵蓋，不重複備份。
     sync_dir "$C" "$CB" repos "isaaclab-uav/.claude/memory"
-    if [ "$is_single" = 0 ]; then
-        sync_dir "$HOST_HOME" "$HOST_BACKUP" repos
-    fi
 fi
 
 # ── claude：專案紀錄與設定 ──────────────────────────────────────────
 if want claude; then
-    # 路徑在 dual 與 single 上皆為 /home/jack/.claude/projects，一律備份到 host/。
     # memory 亦在其中（bind 來源端），是 memory 唯一的備份來源。
-    sync_dir "$HOST_HOME/.claude" "$HOST_BACKUP/.claude" projects
+    sync_dir "$HOME_DIR/.claude" "$BACKUP/.claude" projects
     sync_home_files to_backup "${claude_files[@]}"
 fi
 
 # ── personal：個人資料 ──────────────────────────────────────────────
 if want personal; then
     sync_files "$C" "$CB" "${personal_dirs[@]}"
-    if [ "$is_single" = 0 ]; then
-        sync_files "$HOST_HOME" "$HOST_BACKUP" "${personal_dirs[@]}"
-    fi
 fi
 
 # ── system：系統與 shell 設定 ───────────────────────────────────────
 if want system; then
-    # 不含 /var/lib/lxc/jammy/config：該檔是指向 repos/lxc-config/jammy 的
-    # 符號連結，實檔隨 repos 分類一併備份。
-    sync_files /etc "$BACKUP_ROOT/host/etc" "${etc_files[@]}"
+    # 不含 lxc 容器定義檔：環境融合後已無容器，且該檔原為指向
+    # repos/lxc-config 的符號連結，實檔隨 repos 分類一併備份。
+    sync_files /etc "$BACKUP_ROOT/container/etc" "${etc_files[@]}"
     sync_home_files to_backup "${system_files[@]}"
 fi
 
@@ -125,8 +118,8 @@ fi
 if want app; then
     sync_vscode_user to_backup
 
-    # Tilix 終端機設定存於 dconf，須匯出。屬桌面環境，歸 host。
-    backup_dconf /com/gexperts/Tilix/ "$HOST_BACKUP/tilix.dconf"
+    # Tilix 終端機設定存於 dconf，須匯出為文字檔才能備份
+    backup_dconf /com/gexperts/Tilix/ "$BACKUP/tilix.dconf"
 
     # Chrome／VS Code 登入狀態與 gnome-keyring（三者須齊備才有意義，見 common.sh）
     backup_session_state

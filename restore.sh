@@ -76,8 +76,8 @@ fi
 echo "還原分類：${selected[*]}"
 echo
 
-C="$CONTAINER_HOME"              # container 家目錄（single 時即本機家目錄）
-CB="$CONTAINER_BACKUP"
+C="$HOME_DIR"
+CB="$BACKUP"
 
 # ── repos：程式碼與開發環境 ─────────────────────────────────────────
 if want repos; then
@@ -93,20 +93,15 @@ if want repos; then
         sync_dir "$CB" "$C" "$w" "${ros_ws_excludes[@]}"
     done
 
-    # 排除 isaaclab-uav/.claude/memory：該路徑在 dual 主機上是 mount bind 掛載點，
-    # 直接寫入會落在容器 rootfs 的空掛載點而非真正的資料位置。
-    # memory 由 claude 分類的 projects 一併還原至 bind 來源端。
+    # 排除 isaaclab-uav/.claude/memory：該路徑是 mount bind，寫入它等於寫入
+    # bind 來源端。memory 由 claude 分類的 projects 還原至該來源端。
     sync_dir "$CB" "$C" repos "isaaclab-uav/.claude/memory"
-    if [ "$is_single" = 0 ]; then
-        sync_dir "$HOST_BACKUP" "$HOST_HOME" repos
-    fi
 fi
 
 # ── claude：專案紀錄與設定 ──────────────────────────────────────────
 if want claude; then
-    # 路徑在 dual 與 single 上皆為 /home/jack/.claude/projects。
-    # memory 亦在其中，還原至 bind 來源端後，容器內即可透過 bind 看到。
-    sync_dir "$HOST_BACKUP/.claude" "$HOST_HOME/.claude" projects
+    # memory 亦在其中，還原至 bind 來源端後，repos 下的掛載點即可看到。
+    sync_dir "$BACKUP/.claude" "$HOME_DIR/.claude" projects
     sync_home_files to_home "${claude_files[@]}"
 fi
 
@@ -124,7 +119,7 @@ fi
 # ── app：應用程式狀態 ───────────────────────────────────────────────
 if want app; then
     sync_vscode_user to_home
-    restore_dconf /com/gexperts/Tilix/ "$HOST_BACKUP/tilix.dconf"
+    restore_dconf /com/gexperts/Tilix/ "$BACKUP/tilix.dconf"
     restore_session_state
 fi
 
