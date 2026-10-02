@@ -43,7 +43,7 @@ CATEGORIES=(system app claude repos personal)
 category_desc() {
     case "$1" in
         system)   echo "系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、字型）" ;;
-        app)      echo "應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix）" ;;
+        app)      echo "應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty）" ;;
         claude)   echo "Claude Code（專案紀錄與 memory、settings.json）" ;;
         repos)    echo "程式碼與開發環境（repos、飛控、ROS workspace、conda、Omniverse 快取）" ;;
         personal) echo "個人資料（Documents、Downloads、Pictures、Videos…）" ;;
@@ -406,8 +406,26 @@ claude_files=(
     .claude/settings.json
 )
 
+# app 類：以純文字檔存設定的應用程式（存 dconf 的 Tilix 另以 backup_dconf 處理）
+app_files=(
+    .config/zellij                    # 終端多工器：鍵位（含 Alt r 重啟 rig 席位）
+    .config/alacritty                 # 終端機：無邊框、CJK 等寬字
+    # dock 上「UAV SITL Rig」的啟動圖示（alacritty 開 isaaclab-uav 的 stack/sitl/rig.sh）
+    .local/share/applications/uav-sitl-rig.desktop
+    .local/share/icons/hicolor/scalable/apps/uav-sitl-rig.svg
+)
+
 # 供還原判斷用的完整清單
-home_files=("${system_files[@]}" "${claude_files[@]}")
+home_files=("${system_files[@]}" "${claude_files[@]}" "${app_files[@]}")
+
+# app_files 那兩個程式本身不備份（zellij 住 .local/bin、alacritty 走 apt，皆可重裝），
+# 還原設定後若程式不在，提示怎麼裝回來——否則設定還原了、dock 圖示點下去卻沒反應
+hint_terminal_apps() {
+    command -v alacritty >/dev/null 2>&1 ||
+        echo "  alacritty 未安裝：sudo apt install alacritty"
+    command -v zellij >/dev/null 2>&1 || [ -x "$HOME_DIR/.local/bin/zellij" ] ||
+        echo "  zellij 未安裝：curl -sL https://github.com/zellij-org/zellij/releases/latest/download/zellij-no-web-x86_64-unknown-linux-musl.tar.gz | tar xz -C ~/.local/bin"
+}
 
 # VS Code 個人設定（只取設定本體，避開 3GB 級的快取與 globalStorage）
 vscode_user=(settings.json keybindings.json snippets)

@@ -9,7 +9,7 @@ usage() {
     backup.sh --repos --claude
 
   --system    系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、字型）
-  --app       應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix）
+  --app       應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty）
   --claude    Claude Code（專案紀錄與 memory、settings.json）
   --repos     程式碼與開發環境（repos、飛控、ROS workspace、conda、Omniverse 快取）
   --personal  個人資料（Documents、Downloads、Pictures、Videos…）
@@ -120,6 +120,9 @@ if want app; then
 
     # Tilix 終端機設定存於 dconf，須匯出為文字檔才能備份
     backup_dconf /com/gexperts/Tilix/ "$BACKUP/tilix.dconf"
+
+    # zellij／Alacritty 設定與 SITL rig 的 dock 啟動圖示（純文字檔，直接同步）
+    sync_home_files to_backup "${app_files[@]}"
 
     # Chrome／VS Code 登入狀態與 gnome-keyring（三者須齊備才有意義，見 common.sh）
     backup_session_state

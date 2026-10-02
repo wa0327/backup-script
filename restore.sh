@@ -13,7 +13,7 @@ usage() {
 
   --system    系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、字型）
               /etc 需 root，且 fstab／grub 變更需重開機
-  --app       應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix）
+  --app       應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty）
               執行前須先完全關閉 Chrome 與 VS Code；
               keyring 更換後須登出桌面重新登入才會生效
   --claude    Claude Code（專案紀錄與 memory、settings.json）
@@ -120,6 +120,11 @@ fi
 if want app; then
     sync_vscode_user to_home
     restore_dconf /com/gexperts/Tilix/ "$BACKUP/tilix.dconf"
+
+    # zellij／Alacritty 設定與 SITL rig 的 dock 啟動圖示（只補不刪，本機較新者保留）
+    sync_home_files to_home "${app_files[@]}"
+    hint_terminal_apps
+
     restore_session_state
 fi
 
