@@ -1,5 +1,5 @@
 #!/bin/bash
-# 從本機備份到 ext4。備份為本機的鏡像（帶 --delete）。
+# 從本機備份到 ext4 的 container/。只累加不刪，本機已刪除的檔案在備份端保留。
 
 usage() {
     cat <<'USAGE'

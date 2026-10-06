@@ -8,11 +8,12 @@
 # ext4 下的 host/ 保留為舊實體主機的歷史備份，本腳本不再讀寫。
 #
 # 呼叫端須先設定 RSYNC_MODE：
-#   backup  → 備份為本機的鏡像，用 --delete 使備份不致堆積已刪除的檔案
+#   backup  → 只累加不刪：本機新增或修改的檔案寫入備份，本機已刪除的檔案在備份端
+#             保留。碟上另有舊主機或本機已移除的專案，鏡像式的 --delete 會將其抹除
 #   restore → 只補不刪，用 --update 且不加 --delete，避免蓋掉本機較新的工作
 
 case "$RSYNC_MODE" in
-    backup)  rsync_flags=(--delete) ;;
+    backup)  rsync_flags=() ;;
     restore) rsync_flags=(--update) ;;
     *) echo "common.sh: 未設定 RSYNC_MODE（backup|restore）" >&2; exit 1 ;;
 esac
