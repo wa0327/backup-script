@@ -45,7 +45,7 @@ category_desc() {
     case "$1" in
         system)   echo "系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、字型）" ;;
         app)      echo "應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty）" ;;
-        claude)   echo "Claude Code（專案紀錄與 memory、settings.json）" ;;
+        claude)   echo "Claude Code（專案紀錄與 memory、settings.json、帳號登入快照）" ;;
         repos)    echo "程式碼與開發環境（repos、飛控、ROS workspace、conda、Omniverse 快取）" ;;
         personal) echo "個人資料（Documents、Downloads、Pictures、Videos…）" ;;
     esac

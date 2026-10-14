@@ -10,7 +10,7 @@ usage() {
 
   --system    系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、字型）
   --app       應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty）
-  --claude    Claude Code（專案紀錄與 memory、settings.json）
+  --claude    Claude Code（專案紀錄與 memory、settings.json、帳號登入快照）
   --repos     程式碼與開發環境（repos、飛控、ROS workspace、conda、Omniverse 快取）
   --personal  個人資料（Documents、Downloads、Pictures、Videos…）
   --all       以上全部，不詢問
@@ -99,6 +99,8 @@ if want claude; then
     # memory 亦在其中（bind 來源端），是 memory 唯一的備份來源。
     sync_dir "$HOME_DIR/.claude" "$BACKUP/.claude" projects
     sync_home_files to_backup "${claude_files[@]}"
+    # 各帳號登入快照；排除還原前自動產生的暫存快照
+    sync_dir "$HOME_DIR" "$BACKUP" .claude-auth "before-restore-*.tgz"
 fi
 
 # ── personal：個人資料 ──────────────────────────────────────────────

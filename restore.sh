@@ -16,7 +16,7 @@ usage() {
   --app       應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty）
               執行前須先完全關閉 Chrome 與 VS Code；
               keyring 更換後須登出桌面重新登入才會生效
-  --claude    Claude Code（專案紀錄與 memory、settings.json）
+  --claude    Claude Code（專案紀錄與 memory、settings.json、帳號登入快照）
   --repos     程式碼與開發環境（repos、飛控、ROS workspace、conda、Omniverse 快取）
   --personal  個人資料（Documents、Downloads、Pictures、Videos…）
   --all       以上全部，不詢問
@@ -103,6 +103,7 @@ if want claude; then
     # memory 亦在其中，還原至 bind 來源端後，repos 下的掛載點即可看到。
     sync_dir "$BACKUP/.claude" "$HOME_DIR/.claude" projects
     sync_home_files to_home "${claude_files[@]}"
+    sync_dir "$BACKUP" "$HOME_DIR" .claude-auth "before-restore-*.tgz"
 fi
 
 # ── personal：個人資料 ──────────────────────────────────────────────
