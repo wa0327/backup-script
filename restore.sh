@@ -11,18 +11,20 @@ usage() {
 不加參數時會列出分類供互動選擇。分類可複選，例如：
     restore.sh --repos --claude
 
-  --system    系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、字型）
+  --system    系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、ai-game 金鑰、字型）
               /etc 需 root，且 fstab／grub 變更需重開機
-  --app       應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty）
+  --app       應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty、Godot）
               執行前須先完全關閉 Chrome 與 VS Code；
               keyring 更換後須登出桌面重新登入才會生效
-  --claude    Claude Code（專案紀錄與 memory、settings.json、帳號登入快照）
-  --repos     程式碼與開發環境（repos、飛控、ROS workspace、conda、Omniverse 快取）
+  --claude    Claude Code（專案紀錄與 memory、設定、skills、帳號登入快照）
+  --repos     程式碼與開發環境（repos、飛控、ROS workspace、conda、Omniverse 快取、遠端工作紀錄）
   --personal  個人資料（Documents、Downloads、Pictures、Videos…）
   --all       以上全部，不詢問
 
-.bashrc 與 .profile 一律只提示不還原，即使 --all 也一樣：
+.bashrc 與 .profile 一律不整份還原，即使 --all 也一樣：
 兩者幾乎必定含該機專屬內容，須逐段比對後自行複製。
+但 --system 會替本機 .bashrc 補上缺少的幾行必要設定（Claude 設定目錄、
+claude-auth 與 Android platform-tools 的 PATH、cargo 環境），只補不改，重跑不重複。
 USAGE
 }
 
@@ -96,6 +98,9 @@ if want repos; then
     # 排除 isaaclab-uav/.claude/memory：該路徑是 mount bind，寫入它等於寫入
     # bind 來源端。memory 由 claude 分類的 projects 還原至該來源端。
     sync_dir "$CB" "$C" repos "isaaclab-uav/.claude/memory"
+
+    # ai-game 遠端工作紀錄（le/ledger）
+    sync_dir "$CB" "$C" ai-game/le
 fi
 
 # ── claude：專案紀錄與設定 ──────────────────────────────────────────
@@ -103,7 +108,21 @@ if want claude; then
     # memory 亦在其中，還原至 bind 來源端後，repos 下的掛載點即可看到。
     sync_dir "$BACKUP/.claude" "$HOME_DIR/.claude" projects
     sync_home_files to_home "${claude_files[@]}"
-    sync_dir "$BACKUP" "$HOME_DIR" .claude-auth "before-restore-*.tgz"
+    # 帳號登入快照：本機目錄是 ~/claude-auth（無點）。舊的備份存在 .claude-auth，
+    # 新備份尚未產生 claude-auth 時改從舊處取，還原成 ~/claude-auth
+    if [ -e "$BACKUP/claude-auth" ]; then
+        sync_dir "$BACKUP" "$HOME_DIR" claude-auth "before-restore-*.tgz"
+    elif [ -e "$BACKUP/.claude-auth" ]; then
+        echo "[claude-auth] 由舊備份 .claude-auth 還原到 ~/claude-auth"
+        mkdir -p "$HOME_DIR/claude-auth"
+        if ! rsync -aHAX --numeric-ids "${rsync_flags[@]}" --exclude "before-restore-*.tgz" \
+                  "$BACKUP/.claude-auth/" "$HOME_DIR/claude-auth/"; then
+            echo "[claude-auth] !! 還原失敗"
+            failed+=("claude-auth")
+        fi
+    else
+        echo "[claude-auth] 備份不存在，略過"
+    fi
 fi
 
 # ── personal：個人資料 ──────────────────────────────────────────────
@@ -114,6 +133,8 @@ fi
 # ── system：系統與 shell 設定 ───────────────────────────────────────
 if want system; then
     sync_home_files to_home "${system_files[@]}"
+    # .bashrc 整份不還原，只補缺少的必要設定行（見 common.sh 的 bashrc_essentials）
+    merge_bashrc
     restore_etc
 fi
 

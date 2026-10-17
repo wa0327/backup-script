@@ -43,10 +43,10 @@ CATEGORIES=(system app claude repos personal)
 
 category_desc() {
     case "$1" in
-        system)   echo "系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、字型）" ;;
-        app)      echo "應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty）" ;;
-        claude)   echo "Claude Code（專案紀錄與 memory、settings.json、帳號登入快照）" ;;
-        repos)    echo "程式碼與開發環境（repos、飛控、ROS workspace、conda、Omniverse 快取）" ;;
+        system)   echo "系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、ai-game 金鑰、字型）" ;;
+        app)      echo "應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty、Godot）" ;;
+        claude)   echo "Claude Code（專案紀錄與 memory、設定、skills、帳號登入快照）" ;;
+        repos)    echo "程式碼與開發環境（repos、飛控、ROS workspace、conda、Omniverse 快取、遠端工作紀錄）" ;;
         personal) echo "個人資料（Documents、Downloads、Pictures、Videos…）" ;;
     esac
 }
@@ -400,11 +400,18 @@ system_files=(
     .bash_history .python_history
     .colcon                           # ROS colcon 設定
     set_governor.sh                   # 家目錄下自己寫的腳本
+    .config/ai-game                   # ai-game 的 LINE 金鑰（line.env）與手機簽章（keystore），
+                                      # 遺失無法重建；權限 600 隨 rsync／tar 一併保留
+    .config/systemd/user/ai-game-line.service   # ai-game 的 LINE 接收器服務（team.sh 起停）
 )
 
 # claude 類：Claude Code 的家目錄設定
 claude_files=(
     .claude/settings.json
+    .claude/.claude.json              # 帳號與專案狀態（CLAUDE_CONFIG_DIR 指向 .claude 時存於此）
+    .claude/CLAUDE.md                 # 全域規則
+    .claude/skills                    # 自訂 skill（commit 等）
+    .claude/plans .claude/teams .claude/tasks
 )
 
 # app 類：以純文字檔存設定的應用程式（存 dconf 的 Tilix 另以 backup_dconf 處理）
@@ -414,6 +421,8 @@ app_files=(
     # dock 上「UAV SITL Rig」的啟動圖示（alacritty 開 isaaclab-uav 的 stack/sitl/rig.sh）
     .local/share/applications/uav-sitl-rig.desktop
     .local/share/icons/hicolor/scalable/apps/uav-sitl-rig.svg
+    .config/godot                     # Godot 編輯器設定
+    .local/share/godot/app_userdata/ai-game   # ai-game 遊戲本機的存檔與設定（user://）
 )
 
 # 供還原判斷用的完整清單
@@ -463,6 +472,45 @@ is_never_restore() {
         [ "$f" = "$w" ] && return 0
     done
     return 1
+}
+
+# .bashrc 不整份還原（見上），但下列幾行是本機工具鏈少不了的。還原時從備份端的
+# .bashrc 取出含這些字樣的設定行，本機 .bashrc 缺哪行才補哪行，加在檔尾；
+# 已有的一律不動、不覆蓋，重跑也不會重複加（逐行完全比對）。
+bashrc_essentials=(
+    'CLAUDE_CONFIG_DIR'               # Claude Code 設定目錄
+    'claude-auth'                     # 帳號切換工具的 PATH
+    'Android/Sdk/platform-tools'      # adb 的 PATH（手機安裝與測試）
+    '.cargo/env'                      # Rust 工具鏈
+)
+
+merge_bashrc() {
+    local src="$BACKUP/.bashrc" dst="$HOME_DIR/.bashrc" pat line l seen
+    local add=()
+    if [ ! -e "$src" ]; then
+        echo "[.bashrc] 備份不存在，略過必要設定的補齊"
+        return
+    fi
+    for pat in "${bashrc_essentials[@]}"; do
+        while IFS= read -r line; do
+            # 註解與空行不算設定
+            case "$line" in ''|'#'*|' #'*) continue ;; esac
+            grep -qxF -- "$line" "$dst" 2>/dev/null && continue
+            seen=0
+            for l in "${add[@]}"; do [ "$l" = "$line" ] && seen=1; done
+            [ "$seen" = 0 ] && add+=("$line")
+        done < <(grep -F -- "$pat" "$src")
+    done
+    if [ ${#add[@]} -eq 0 ]; then
+        echo "[.bashrc] 必要設定都已存在，未變動"
+        return
+    fi
+    {
+        echo
+        echo "# 由 restore.sh 補上：備份端 .bashrc 有、本機缺少的必要設定"
+        printf '%s\n' "${add[@]}"
+    } >>"$dst"
+    echo "[.bashrc] 補上 ${#add[@]} 行必要設定（其餘內容未動）"
 }
 
 # 預設不自動還原，但 --all 時會一併還原。

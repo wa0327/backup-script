@@ -8,10 +8,10 @@ usage() {
 不加參數時會列出分類供互動選擇。分類可複選，例如：
     backup.sh --repos --claude
 
-  --system    系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、字型）
-  --app       應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty）
-  --claude    Claude Code（專案紀錄與 memory、settings.json、帳號登入快照）
-  --repos     程式碼與開發環境（repos、飛控、ROS workspace、conda、Omniverse 快取）
+  --system    系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、ai-game 金鑰、字型）
+  --app       應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty、Godot）
+  --claude    Claude Code（專案紀錄與 memory、設定、skills、帳號登入快照）
+  --repos     程式碼與開發環境（repos、飛控、ROS workspace、conda、Omniverse 快取、遠端工作紀錄）
   --personal  個人資料（Documents、Downloads、Pictures、Videos…）
   --all       以上全部，不詢問
 
@@ -92,6 +92,9 @@ if want repos; then
     # 排除 isaaclab-uav/.claude/memory：該路徑是指向 .claude/projects 之下的
     # mount bind，其資料已由 claude 分類的 projects 備份涵蓋，不重複備份。
     sync_dir "$C" "$CB" repos "isaaclab-uav/.claude/memory"
+
+    # ai-game 遠端工作紀錄（le/ledger：已派出、尚未取回的工作）
+    sync_dir "$C" "$CB" ai-game/le
 fi
 
 # ── claude：專案紀錄與設定 ──────────────────────────────────────────
@@ -99,8 +102,9 @@ if want claude; then
     # memory 亦在其中（bind 來源端），是 memory 唯一的備份來源。
     sync_dir "$HOME_DIR/.claude" "$BACKUP/.claude" projects
     sync_home_files to_backup "${claude_files[@]}"
-    # 各帳號登入快照；排除還原前自動產生的暫存快照
-    sync_dir "$HOME_DIR" "$BACKUP" .claude-auth "before-restore-*.tgz"
+    # 各帳號登入快照；排除還原前自動產生的暫存快照。
+    # 本機目錄是 ~/claude-auth（無點）；舊寫成 .claude-auth 時來源不存在，一直被靜默略過
+    sync_dir "$HOME_DIR" "$BACKUP" claude-auth "before-restore-*.tgz"
 fi
 
 # ── personal：個人資料 ──────────────────────────────────────────────
