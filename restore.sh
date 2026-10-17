@@ -12,7 +12,7 @@ usage() {
     restore.sh --repos --claude
 
   --system    系統與 shell 設定（/etc、dotfiles、SSH／GPG 金鑰、ai-game 金鑰、字型）
-              /etc 需 root，且 fstab／grub 變更需重開機
+              /etc 需 root；fstab 與 grub 一律不還原，只在結尾列出
   --app       應用程式狀態（Chrome／VS Code 登入狀態、keyring、Tilix、zellij／Alacritty、Godot）
               執行前須先完全關閉 Chrome 與 VS Code；
               keyring 更換後須登出桌面重新登入才會生效
@@ -21,10 +21,11 @@ usage() {
   --personal  個人資料（Documents、Downloads、Pictures、Videos…）
   --all       以上全部，不詢問
 
-.bashrc 與 .profile 一律不整份還原，即使 --all 也一樣：
-兩者幾乎必定含該機專屬內容，須逐段比對後自行複製。
-但 --system 會替本機 .bashrc 補上缺少的幾行必要設定（Claude 設定目錄、
-claude-auth 與 Android platform-tools 的 PATH、cargo 環境），只補不改，重跑不重複。
+.bashrc、.profile、/etc/fstab、/etc/default/grub 一律只備份、不還原，即使 --all 也一樣：
+它們幾乎必定含該機專屬內容（磁碟 UUID、開機參數、PATH），須逐段比對後自行複製，
+還原結尾會列出備份檔位置。--system 另會比對本機 .bashrc 是否缺少幾行必要設定
+（Claude 設定目錄、claude-auth 與 Android platform-tools 的 PATH、cargo 環境），
+缺少的列在結尾並附一行補上的指令；腳本本身不改 .bashrc。
 USAGE
 }
 
@@ -133,8 +134,8 @@ fi
 # ── system：系統與 shell 設定 ───────────────────────────────────────
 if want system; then
     sync_home_files to_home "${system_files[@]}"
-    # .bashrc 整份不還原，只補缺少的必要設定行（見 common.sh 的 bashrc_essentials）
-    merge_bashrc
+    # .bashrc 一律不寫；只比對必要設定，缺少的列在結尾並附補上的指令（見 common.sh 的 bashrc_essentials）
+    report_bashrc
     restore_etc
 fi
 

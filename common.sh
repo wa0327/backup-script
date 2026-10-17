@@ -301,6 +301,12 @@ restore_personal() {
 restore_etc() {
     local f src
 
+    # 列為一律手動的（fstab、grub）不寫入，只在結尾提示；即使沒有 root 也照樣列出
+    for f in "${etc_files[@]}"; do
+        src="$BACKUP_ROOT/container/etc/$f"
+        is_never_restore "/etc/$f" && [ -e "$src" ] && manual+=("（一律手動）$src  →  /etc/$f")
+    done
+
     if ! sudo -n true 2>/dev/null; then
         echo "!! 還原 /etc 需要 root 權限，請以可 sudo 的身分執行"
         failed+=("etc：無 root 權限")
@@ -309,6 +315,7 @@ restore_etc() {
 
     echo "還原系統設定（直接覆蓋，不保留原檔）"
     for f in "${etc_files[@]}"; do
+        is_never_restore "/etc/$f" && continue
         src="$BACKUP_ROOT/container/etc/$f"
         if [ ! -e "$src" ]; then
             echo "  [$f] 備份不存在，略過"
@@ -322,7 +329,7 @@ restore_etc() {
         fi
     done
 
-    echo "系統設定還原完成。fstab／grub 變更需重開機，sudoers 立即生效。"
+    echo "系統設定還原完成（fstab、grub 不自動還原，見結尾）。sudoers 立即生效。"
 }
 
 # ── dconf 設定 ─────────────────────────────────────────────────────
@@ -459,11 +466,14 @@ etc_files=(
     sudoers.d/jack                    # sudo 權限設定
 )
 
-# 一律只備份、絕不自動還原（--all 亦然），僅提示備份檔位置供人工複製。
-# 這兩個檔幾乎必定含該機專屬內容（PATH、conda 初始化、硬體相關設定），
+# 一律只備份、絕不自動還原（--all 亦然），僅在還原結尾提示備份檔位置供人工複製。
+# 這些檔幾乎必定含該機專屬內容（PATH、conda 初始化、硬體相關設定、磁碟 UUID、開機參數），
 # 整份覆蓋等於把另一台機器的環境搬過來，得逐段比對才安全。
+# /etc 下的以 /etc/ 開頭標示，由 restore_etc 判斷；其餘為家目錄下的路徑。
 never_restore=(
     .bashrc .profile
+    /etc/fstab                        # 磁碟 UUID 依機器而異，蓋錯會開不了機
+    /etc/default/grub                 # 開機參數依硬體而異
 )
 
 is_never_restore() {
@@ -474,9 +484,9 @@ is_never_restore() {
     return 1
 }
 
-# .bashrc 不整份還原（見上），但下列幾行是本機工具鏈少不了的。還原時從備份端的
-# .bashrc 取出含這些字樣的設定行，本機 .bashrc 缺哪行才補哪行，加在檔尾；
-# 已有的一律不動、不覆蓋，重跑也不會重複加（逐行完全比對）。
+# .bashrc 一律不寫（見上），但下列幾行是本機工具鏈少不了的。還原時從備份端的
+# .bashrc 取出含這些字樣的設定行，比對本機 .bashrc，缺少的在還原結尾列出，
+# 並附一行可直接執行的指令，由使用者決定是否補上。腳本本身不動 .bashrc。
 bashrc_essentials=(
     'CLAUDE_CONFIG_DIR'               # Claude Code 設定目錄
     'claude-auth'                     # 帳號切換工具的 PATH
@@ -484,13 +494,10 @@ bashrc_essentials=(
     '.cargo/env'                      # Rust 工具鏈
 )
 
-merge_bashrc() {
-    local src="$BACKUP/.bashrc" dst="$HOME_DIR/.bashrc" pat line l seen
+report_bashrc() {
+    local src="$BACKUP/.bashrc" dst="$HOME_DIR/.bashrc" pat line l seen cmd
     local add=()
-    if [ ! -e "$src" ]; then
-        echo "[.bashrc] 備份不存在，略過必要設定的補齊"
-        return
-    fi
+    [ -e "$src" ] || return 0
     for pat in "${bashrc_essentials[@]}"; do
         while IFS= read -r line; do
             # 註解與空行不算設定
@@ -502,15 +509,17 @@ merge_bashrc() {
         done < <(grep -F -- "$pat" "$src")
     done
     if [ ${#add[@]} -eq 0 ]; then
-        echo "[.bashrc] 必要設定都已存在，未變動"
-        return
+        echo "[.bashrc] 必要設定都已存在"
+        return 0
     fi
-    {
-        echo
-        echo "# 由 restore.sh 補上：備份端 .bashrc 有、本機缺少的必要設定"
-        printf '%s\n' "${add[@]}"
-    } >>"$dst"
-    echo "[.bashrc] 補上 ${#add[@]} 行必要設定（其餘內容未動）"
+    # 一行可直接貼上的指令：每行以單引號包住（行內的單引號另行跳脫），附加到檔尾
+    cmd="printf '%s\\n'"
+    for l in "${add[@]}"; do
+        cmd+=" '${l//\'/\'\\\'\'}'"
+    done
+    cmd+=" >> ~/.bashrc"
+    manual+=("（.bashrc 缺少 ${#add[@]} 行必要設定，要補上可執行）$cmd")
+    echo "[.bashrc] 缺少 ${#add[@]} 行必要設定，已列在結尾（未改動 .bashrc）"
 }
 
 # 預設不自動還原，但 --all 時會一併還原。
