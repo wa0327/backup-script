@@ -135,5 +135,5 @@ if want app; then
 fi
 
 # 確保所有資料真正落到磁碟，避免拔碟時資料還停留在快取
-sync
+flush_disk
 report 備份

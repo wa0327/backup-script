@@ -62,6 +62,37 @@ want() {
     return 1
 }
 
+# ── 進度顯示 ────────────────────────────────────────────────────────
+# 大目錄一跑十幾分鐘，沒有畫面就分不出是在跑還是卡住。進度條畫在 stderr，
+# 只在 stderr 是終端機時才畫；排程或導向檔案時不畫，也省去估算總量的試跑。
+PROGRESS_PY="$(dirname "${BASH_SOURCE[0]}")/progress.py"
+
+show_progress() {
+    [ -t 2 ]
+}
+
+# _pending_bytes <標籤> <rsync 參數...>
+# 以 rsync 試跑估算這次實際要搬的位元組數，作為進度條的分母。
+# 參數與正式那次相同，排除規則與 --update 才會一致；試跑走過的目錄留在快取裡，
+# 正式那次的比對會快很多。
+_pending_bytes() {
+    local label="$1"
+    shift
+    local n
+    n=$(rsync -n --out-format='%i %l' "$@" 2>/dev/null | python3 "$PROGRESS_PY" scan "$label")
+    echo "${n:-0}"
+}
+
+# 確保所有資料真正落到磁碟，避免拔碟時資料還停留在快取。
+# 寫入 USB 碟時這一步可能要好幾分鐘，故同樣顯示剩餘量。
+flush_disk() {
+    if show_progress; then
+        python3 "$PROGRESS_PY" flush || sync
+    else
+        sync
+    fi
+}
+
 # 記錄失敗項目，由呼叫端在結尾統一回報
 failed=()
 
@@ -103,11 +134,21 @@ sync_dir() {
             # 打包根目錄，故去掉該斜線後接在 sub 之後即為等效的錨定寫法
             tar_excludes+=(--exclude "$sub/${e#/}")
         done
+        # 打包與解壓之間夾一段計量；不畫進度時以 cat 佔位，管線形狀不變
+        local meter=(cat)
+        if show_progress; then
+            # 試跑的目的地須是空目錄，估出來的才是全量
+            local empty total
+            empty=$(mktemp -d)
+            total=$(_pending_bytes "$sub" -aHAX "${excludes[@]}" "$src_root/$sub" "$empty/")
+            rmdir "$empty"
+            meter=(python3 "$PROGRESS_PY" pipe "$sub" "$total")
+        fi
         # PIPESTATUS 檢查打包端，管線末端的解壓成功不代表來源全部讀得到
-        tar -cf - "${tar_excludes[@]}" -C "$src_root" "$sub" | tar -xpf - -C "$dst_root"
+        tar -cf - "${tar_excludes[@]}" -C "$src_root" "$sub" | "${meter[@]}" | tar -xpf - -C "$dst_root"
         local rc=("${PIPESTATUS[@]}")
-        if [ "${rc[0]}" != 0 ] || [ "${rc[1]}" != 0 ]; then
-            echo "[$sub] !! 全量搬遷失敗（tar 打包=${rc[0]} 解壓=${rc[1]}）"
+        if [ "${rc[0]}" != 0 ] || [ "${rc[1]}" != 0 ] || [ "${rc[2]}" != 0 ]; then
+            echo "[$sub] !! 全量搬遷失敗（tar 打包=${rc[0]} 傳送=${rc[1]} 解壓=${rc[2]}）"
             failed+=("$sub")
         fi
     else
@@ -116,8 +157,18 @@ sync_dir() {
         # 否則會被平鋪到 dst_root 下而與 tar 分支的結果不一致
         local dst_parent="$dst_root/$(dirname "$sub")"
         mkdir -p "$dst_parent"
-        if ! rsync -aHAX --numeric-ids "${rsync_flags[@]}" "${excludes[@]}" \
-                  "$src_root/$sub" "$dst_parent/"; then
+        local args=(-aHAX --numeric-ids "${rsync_flags[@]}" "${excludes[@]}"
+                    "$src_root/$sub" "$dst_parent/")
+        local ok=1
+        if show_progress; then
+            local total
+            total=$(_pending_bytes "$sub" "${args[@]}")
+            rsync --info=progress2 "${args[@]}" | python3 "$PROGRESS_PY" rsync "$sub" "$total"
+            [ "${PIPESTATUS[0]}" = 0 ] || ok=0
+        else
+            rsync "${args[@]}" || ok=0
+        fi
+        if [ "$ok" = 0 ]; then
             echo "[$sub] !! 增量同步失敗"
             failed+=("$sub")
         fi
@@ -381,11 +432,15 @@ report() {
         echo
     fi
 
+    # SECONDS 為 bash 內建，自腳本啟動起算
+    local took
+    took=$(printf '%d:%02d:%02d' $((SECONDS / 3600)) $((SECONDS % 3600 / 60)) $((SECONDS % 60)))
+
     if [ ${#failed[@]} -gt 0 ]; then
-        echo "!! ${action}未完全成功，以下項目失敗：${failed[*]}"
+        echo "!! ${action}未完全成功（總用時 $took），以下項目失敗：${failed[*]}"
         exit 1
     fi
-    echo "${action}完成"
+    echo "${action}完成，總用時 $took"
 }
 
 # ── 家目錄設定檔清單 ────────────────────────────────────────────────
